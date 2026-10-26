@@ -28,4 +28,12 @@
 #define TETRA_SYNC_MAX_ERRORS 4
 #endif
 
+/**
+ * Recognise TMO uplink signals (TETRA_EV_SIGNAL) while the TMO receiver is
+ * not synchronised to a downlink. Set to 0 to save flash and RAM.
+ */
+#ifndef TETRA_UPLINK_DETECT
+#define TETRA_UPLINK_DETECT 1
+#endif
+
 #endif /* TETRA_CONFIG_H */

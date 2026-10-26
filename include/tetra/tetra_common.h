@@ -27,6 +27,7 @@ enum tetra_event_type {
     TETRA_EV_SDS,      /**< Short data or status message. */
     TETRA_EV_TRAFFIC,  /**< One traffic slot for the speech codec. */
     TETRA_EV_PDU,      /**< Other layer 2/3 PDU, for monitoring. */
+    TETRA_EV_SIGNAL,   /**< Recognised signal that cannot be decoded. */
 };
 
 /** Position in the TDMA structure. */
@@ -39,6 +40,16 @@ struct tetra_time {
 /** Synchronisation event. */
 struct tetra_sync {
     bool locked;
+};
+
+/** Signal types reported by TETRA_EV_SIGNAL. */
+enum tetra_signal_type {
+    TETRA_SIG_TMO_UPLINK = 0, /**< TMO uplink (MS to BS) transmissions. */
+};
+
+/** Signal recognition event. */
+struct tetra_signal {
+    enum tetra_signal_type type;
 };
 
 /** TMO cell information, refreshed by SYNC and SYSINFO. */
@@ -194,6 +205,7 @@ struct tetra_event {
         struct tetra_sds sds;
         struct tetra_traffic traffic;
         struct tetra_pdu pdu;
+        struct tetra_signal signal;
     } u;
 };
 

@@ -11,6 +11,9 @@
  * information, call control, short data and traffic through the event
  * callback. Air interface encryption is not supported: encrypted PDUs are
  * reported as such and not parsed.
+ *
+ * While not synchronised, the receiver recognises TMO uplink transmissions
+ * and reports them once with TETRA_EV_SIGNAL (TETRA_UPLINK_DETECT).
  */
 
 #include <stddef.h>
@@ -50,6 +53,14 @@ struct tetra_tmo_call_state {
     uint32_t talker_ssi;
 };
 
+struct tetra_tmo_uldet {
+    bool reported;
+    uint8_t score;
+    uint32_t last_np; /* bit count at the last n/p hit, 0 = none */
+    uint32_t last_ev; /* bit count at the last uplink evidence */
+    uint32_t last_dl; /* bit count at the last downlink evidence */
+};
+
 struct tetra_tmo_rx {
     struct tetra_rx_config cfg;
     struct tetra_rxcore core;
@@ -67,6 +78,9 @@ struct tetra_tmo_rx {
     int8_t tch[TETRA_TCH_BITS];
     struct tetra_tmo_frag frag[4];
     struct tetra_tmo_call_state calls[TETRA_TMO_MAX_CALLS];
+#if TETRA_UPLINK_DETECT
+    struct tetra_tmo_uldet ul;
+#endif
 };
 
 /**

@@ -139,6 +139,9 @@ static void on_event(void *user, const struct tetra_event *ev)
                t->half[1]);
         break;
     }
+    case TETRA_EV_SIGNAL:
+        printf("SIGNAL TMO uplink, not decoded\n");
+        break;
     case TETRA_EV_PDU:
         printf("PDU proto %d type %u addr %u %u bits%s\n", ev->u.pdu.proto,
                ev->u.pdu.type, ev->u.pdu.addr, ev->u.pdu.nbits,

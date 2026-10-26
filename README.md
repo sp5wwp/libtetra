@@ -8,7 +8,7 @@ TETRA library focused on 32-bit MCUs.
   state, traffic, TPNI, short data including fragmented messages.
 - **TMO downlink** (EN 300 392-2, pi/4-DQPSK): synchronisation, SYSINFO,
   AACH, MAC (association, fragmentation), LLC, MLE, CMCE calls, traffic,
-  SDS and status.
+  SDS and status. TMO uplink signals are recognised (not decoded).
 - SDS-TL / simple text decoding to UTF-8 (GSM 7-bit, ISO 8859-1, UCS-2).
 - Speech channel decoding (EN 300 395-2): traffic slots to 137-bit
   speech frames with bad frame indicator, ready for OpenACELP.

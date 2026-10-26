@@ -33,6 +33,7 @@ struct capture {
     std::vector<std::string> texts;
     std::vector<std::vector<uint8_t>> tch;
     std::vector<uint8_t> tch_um;
+    unsigned uplinks = 0;
 };
 
 void on_event(void *user, const struct tetra_event *ev)
@@ -70,6 +71,10 @@ void on_event(void *user, const struct tetra_event *ev)
         c->tch_um.push_back(ev->u.traffic.usage_marker);
         break;
     }
+    case TETRA_EV_SIGNAL:
+        if (ev->u.signal.type == TETRA_SIG_TMO_UPLINK)
+            c->uplinks++;
+        break;
     default:
         break;
     }
@@ -321,6 +326,7 @@ TEST_CASE("TMO receiver decodes a real downlink recording excerpt",
     tetra_tmo_push_dibits(&c.rx, dibits.data(), dibits.size());
 
     REQUIRE(c.locks == 1);
+    REQUIRE(c.uplinks == 0);
     REQUIRE(c.cell.mcc == 235);
     REQUIRE(c.cell.mnc == 78);
     REQUIRE(c.cell.colour_code == 1);
@@ -424,3 +430,69 @@ TEST_CASE("TMO receiver handles SYSINFO, association, fragmentation and SDS",
     REQUIRE(c.texts[0] == "HI");
     REQUIRE(c.texts[1] == long_text);
 }
+
+/* ---- Uplink recognition ---- */
+
+#if TETRA_UPLINK_DETECT
+
+namespace
+{
+
+const uint8_t seq_n[22] = { 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1,
+                            0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0 };
+const uint8_t seq_x[30] = { 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1,
+                            0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1 };
+
+enum ul_burst { UL_NONE, UL_CB, UL_NUB };
+
+/*
+ * Random bits with an uplink burst every TDMA frame from second 3 on:
+ * control uplink bursts (x at burst bit 88) or normal uplink bursts
+ * (n at burst bit 220), starting 34 bits into slot 1.
+ */
+std::vector<uint8_t> uplink_bits(enum ul_burst kind, unsigned seconds)
+{
+    std::vector<uint8_t> b(36000 * seconds);
+    uint32_t r = 12345;
+
+    for (auto &v : b) {
+        r ^= r << 13;
+        r ^= r >> 17;
+        r ^= r << 5;
+        v = r & 1;
+    }
+    for (size_t f = 3 * 36000; f + 2040 < b.size(); f += 2040) {
+        if (kind == UL_CB)
+            std::memcpy(&b[f + 34 + 88], seq_x, 30);
+        else if (kind == UL_NUB)
+            std::memcpy(&b[f + 34 + 220], seq_n, 22);
+    }
+    return b;
+}
+
+} // namespace
+
+TEST_CASE("TMO receiver recognises uplink transmissions", "[tmo]")
+{
+    for (enum ul_burst kind : { UL_CB, UL_NUB }) {
+        static capture c;
+        std::vector<uint8_t> b = uplink_bits(kind, 15);
+
+        c.uplinks = 0;
+        init(c);
+        tetra_tmo_push_bits(&c.rx, b.data(), b.size());
+        REQUIRE(c.locks == 0);
+        REQUIRE(c.uplinks == 1);
+    }
+}
+
+TEST_CASE("Random bits are not taken for an uplink", "[tmo]")
+{
+    static capture c;
+    std::vector<uint8_t> b = uplink_bits(UL_NONE, 120);
+
+    init(c);
+    tetra_tmo_push_bits(&c.rx, b.data(), b.size());
+    REQUIRE(c.uplinks == 0);
+}
+#endif

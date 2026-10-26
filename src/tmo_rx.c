@@ -64,6 +64,9 @@ static void set_lock(struct tetra_tmo_rx *rx, bool locked)
     if (rx->locked == locked)
         return;
     rx->locked = locked;
+#if TETRA_UPLINK_DETECT
+    memset(&rx->ul, 0, sizeof(rx->ul));
+#endif
     if (!locked) {
         memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
         for (unsigned i = 0; i < 4; i++)
@@ -260,11 +263,108 @@ static void locked_slot(struct tetra_tmo_rx *rx)
     process_slot(rx, rx->slot_start, kind == 2, kind == 0);
 }
 
+#if TETRA_UPLINK_DETECT
+/*
+ * Uplink recognition, EN 300 392-2 clause 9.4.4. Evidence for an uplink is
+ * the extended training sequence x of the control uplink burst, or normal
+ * training sequences n/p a whole number of slots apart without the training
+ * sequence q that a continuous downlink carries across slot boundaries.
+ * The sync training sequence y (downlink, DMO) cancels the evidence.
+ */
+#define UL_SEQ_N 0x343a74u
+#define UL_SEQ_P 0x1e90deu
+#define UL_SEQ_X 0x2743a743u
+#define UL_MAX_SLOTS 8
+#define UL_SLACK 4
+/* Bits without y needed before reporting: two multiframes. */
+#define UL_QUIET (2 * 18 * 4 * SLOT_BITS)
+/* Bits without evidence after which the detection is forgotten: 10 s. */
+#define UL_GAP 360000u
+#define UL_SCORE 4
+
+static unsigned seq_errors(uint64_t sr, uint32_t word, unsigned n)
+{
+    uint64_t d = (sr ^ word) & ((1ull << n) - 1);
+    unsigned cnt = 0;
+
+    while (d) {
+        d &= d - 1;
+        cnt++;
+    }
+    return cnt;
+}
+
+/* n/p hit ending at bit count wr: true if it looks like an uplink burst. */
+static bool ul_np_hit(struct tetra_tmo_uldet *ul, const struct tetra_rxcore *c,
+                      uint32_t wr)
+{
+    uint32_t start = wr - 22, last = ul->last_np, d;
+
+    /* Continuous downlink: q11..q22 starts 244 bits before n/p, q1 10 more */
+    if (wr > 22 + 254 &&
+        rxcore_corr(c, start - 254, tetra_seq_q, 22) >= TRAIN_MIN) {
+        ul->last_dl = wr;
+        return false;
+    }
+    ul->last_np = wr;
+    if (!last)
+        return false;
+    d = wr - last;
+    if (d > UL_MAX_SLOTS * SLOT_BITS + UL_SLACK)
+        return false;
+    d = (d + UL_SLACK) % SLOT_BITS;
+    return d <= 2 * UL_SLACK && wr - last > 2 * UL_SLACK;
+}
+
+static void ul_detect(struct tetra_tmo_rx *rx)
+{
+    struct tetra_tmo_uldet *ul = &rx->ul;
+    uint64_t sr = rx->core.hard_sr;
+    uint32_t wr = rx->core.wr;
+    bool hit = false;
+
+    if (ul->score && wr - ul->last_ev > UL_GAP) {
+        ul->score = 0;
+        ul->reported = false;
+    }
+    if (rxcore_sync_errors(&rx->core) <= TETRA_SYNC_MAX_ERRORS)
+        ul->last_dl = wr;
+    else if (seq_errors(sr, UL_SEQ_X, 30) <= 2)
+        hit = true;
+    else if (seq_errors(sr, UL_SEQ_N, 22) <= 1 ||
+             seq_errors(sr, UL_SEQ_P, 22) <= 1)
+        hit = ul_np_hit(ul, &rx->core, wr);
+
+    if (ul->last_dl == wr) {
+        ul->score = 0;
+        return;
+    }
+    if (!hit)
+        return;
+    ul->last_ev = wr;
+    if (ul->score < UINT8_MAX)
+        ul->score++;
+    if (!ul->reported && ul->score >= UL_SCORE &&
+        wr - ul->last_dl >= UL_QUIET) {
+        struct tetra_event ev;
+
+        ul->reported = true;
+        memset(&ev, 0, sizeof(ev));
+        ev.type = TETRA_EV_SIGNAL;
+        ev.u.signal.type = TETRA_SIG_TMO_UPLINK;
+        tmo_emit(rx, &ev);
+    }
+}
+#endif
+
 static void push_one(struct tetra_tmo_rx *rx, int8_t s)
 {
     rxcore_push(&rx->core, s);
 
     if (!rx->locked) {
+#if TETRA_UPLINK_DETECT
+        ul_detect(rx);
+#endif
         if (!rx->cand &&
             rxcore_sync_errors(&rx->core) <= TETRA_SYNC_MAX_ERRORS) {
             /* y38 is the bit just received */
