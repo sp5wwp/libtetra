@@ -52,17 +52,30 @@ void lmac_encode(enum lmac_chan ch, const uint8_t *type1, uint32_t scramb,
                  uint8_t *type5);
 
 /**
- * Viterbi decoder for a 16-state code with nout output bits per input bit.
- * tab gives the output bits (first output in the MSB) for each 5-bit
- * register value; the code is assumed to end in state 0.
+ * Viterbi decoder of the rate 1/4 RCPC mother code (4 soft values per
+ * step), ending in state 0.
  */
-void viterbi_core(const int8_t *mother, unsigned nout, const uint8_t *tab,
-                  unsigned k2, uint8_t *out, uint16_t *dec);
+void viterbi_rcpc(const int8_t *mother, unsigned k2, uint8_t *out,
+                  uint16_t *dec);
+
+/**
+ * Viterbi decoder of the rate 1/3 speech code (3 soft values per step),
+ * ending in state 0.
+ */
+void viterbi_speech(const int8_t *mother, unsigned k2, uint8_t *out,
+                    uint16_t *dec);
+
+/** Speech code output (G1 in bit 2 .. G3 in bit 0) for register r. */
+uint8_t conv_out3(unsigned r);
 
 /** Mother code output (V1 in bit 3 .. V4 in bit 0) for register r. */
 uint8_t conv_out_nibble(unsigned r);
 
-/** Descramble a traffic block (TCH): soft in place. */
-void lmac_tch_descramble(int8_t *soft, unsigned n, uint32_t scramb);
+/**
+ * Descramble soft bits in place, using the scrambling sequence cache of the
+ * workspace.
+ */
+void lmac_descramble(struct tetra_lmac_ws *ws, int8_t *soft, unsigned n,
+                     uint32_t scramb);
 
 #endif /* TETRA_LMAC_H */

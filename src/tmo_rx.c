@@ -16,6 +16,11 @@
 #define TRAIN_MIN 600
 /* Bits searched either side of the expected burst position. */
 #define TIMING_SEARCH 4
+/* Correlation (per mille) accepted without trying other offsets. */
+#define TRAIN_SURE 900
+
+/* Burst offsets tried, nearest first. */
+static const int8_t search_order[] = { 0, -2, 2, -4, 4 };
 /* Slots without a recognisable burst before declaring loss of lock. */
 #define LOCK_LOSS_SLOTS 144
 
@@ -123,7 +128,7 @@ static uint8_t decode_aach(struct tetra_tmo_rx *rx, uint32_t s, bool sb)
         rxcore_copy(&rx->core, s + TMO_NDB_BB1, bb, 14);
         rxcore_copy(&rx->core, s + TMO_NDB_BB2, bb + 14, 16);
     }
-    tetra_descramble_soft(bb, 30, rx->scramb);
+    lmac_descramble(&rx->ws, bb, 30, rx->scramb);
     tetra_soft_to_bits(bb, hb, 30);
     for (unsigned i = 0; i < 30; i++)
         cw = (cw << 1) | hb[i];
@@ -154,7 +159,7 @@ static void process_traffic_full(struct tetra_tmo_rx *rx, uint32_t s,
 {
     rxcore_copy(&rx->core, s + TMO_NDB_BLK1, rx->tch, 216);
     rxcore_copy(&rx->core, s + TMO_NDB_BLK2, rx->tch + 216, 216);
-    lmac_tch_descramble(rx->tch, TETRA_TCH_BITS, rx->scramb);
+    lmac_descramble(&rx->ws, rx->tch, TETRA_TCH_BITS, rx->scramb);
     tmo_traffic(rx, um, TETRA_HALF_TCH, TETRA_HALF_TCH);
 }
 
@@ -187,7 +192,7 @@ static void process_stolen(struct tetra_tmo_rx *rx, uint32_t s, uint8_t um)
         memset(rx->tch, 0, 216);
         rxcore_copy(&rx->core, s + TMO_NDB_BLK2, rx->tch + 216, 216);
         /* Block 2 alone is scrambled from its own first bit. */
-        lmac_tch_descramble(rx->tch + 216, 216, rx->scramb);
+        lmac_descramble(&rx->ws, rx->tch + 216, 216, rx->scramb);
         tmo_traffic(rx, um, h1, h2);
     }
 }
@@ -246,11 +251,17 @@ static void locked_slot(struct tetra_tmo_rx *rx)
 {
     int best = -2000, best_off = 0, kind = -1;
 
-    for (int off = -TIMING_SEARCH; off <= TIMING_SEARCH; off += 2) {
+    for (unsigned i = 0; i < sizeof(search_order); i++) {
+        int off = search_order[i];
         uint32_t s = rx->slot_start + (uint32_t)off;
-        int cn = rxcore_corr(&rx->core, s + TMO_NDB_TRAIN, tetra_seq_n, 22);
-        int cp = rxcore_corr(&rx->core, s + TMO_NDB_TRAIN, tetra_seq_p, 22);
-        int cy = rxcore_corr(&rx->core, s + TMO_SB_TRAIN, tetra_seq_y, 38);
+        int cn, cp, cy;
+
+        /* Timing usually holds: stop at a clear match. */
+        if (best >= TRAIN_SURE)
+            break;
+        cn = rxcore_corr(&rx->core, s + TMO_NDB_TRAIN, tetra_seq_n, 22);
+        cp = rxcore_corr(&rx->core, s + TMO_NDB_TRAIN, tetra_seq_p, 22);
+        cy = rxcore_corr(&rx->core, s + TMO_SB_TRAIN, tetra_seq_y, 38);
 
         if (cn > best) {
             best = cn;

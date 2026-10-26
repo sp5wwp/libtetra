@@ -85,7 +85,7 @@ case TETRA_EV_CALL:
 
 ## Footprint
 
-About 17 KB of flash. RAM is the context: 5.3 KB (DMO) or 6.5 KB (TMO),
+About 19 KB of flash. RAM is the context: 5.4 KB (DMO) or 6.5 KB (TMO),
 sizes adjustable in `tetra_config.h`, plus 1.6 KB for the speech decoder
 workspace. Stack use stays below 1 KB plus the callback.
 

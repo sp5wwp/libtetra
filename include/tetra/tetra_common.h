@@ -262,7 +262,13 @@ struct tetra_rxcore {
     uint64_t hard_sr; /* last 64 hard bits, newest in bit 0 */
 };
 
+/* Scrambling sequences of the last two scrambler states, MSB first. */
+#define TETRA_SCR_WORDS 14
+
 struct tetra_lmac_ws {
+    uint32_t scr_init[2];
+    uint32_t scr_seq[2][TETRA_SCR_WORDS];
+    uint8_t scr_next;
     int8_t in[432];
     int8_t t5[432];
     int8_t t3[432];

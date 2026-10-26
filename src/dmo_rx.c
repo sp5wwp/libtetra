@@ -20,6 +20,11 @@
 #define TRAIN_MIN_SYNC 600
 #define TRAIN_MIN_NORMAL 750
 #define TIMING_SEARCH 4
+/* Correlation (per mille) accepted without trying other offsets. */
+#define TRAIN_SURE 900
+
+/* Burst offsets tried, nearest first. */
+static const int8_t search_order[] = { 0, -2, 2, -4, 4 };
 /* Empty slots before the timing reference is dropped (about 4 s). */
 #define LOCK_LOSS_SLOTS 288
 
@@ -137,8 +142,8 @@ static void process_dnb(struct tetra_dmo_rx *rx, uint32_t s, bool train_n)
         if (rx->traffic && !rx->frag.active) {
             rxcore_copy(&rx->core, s + DMO_DNB_BLK1, rx->tch, 216);
             rxcore_copy(&rx->core, s + DMO_DNB_BLK2, rx->tch + 216, 216);
-            tetra_descramble_soft(rx->tch, TETRA_TCH_BITS,
-                                  tetra_scramb_init(rx->dcc));
+            lmac_descramble(&rx->ws, rx->tch, TETRA_TCH_BITS,
+                            tetra_scramb_init(rx->dcc));
             dmo_traffic(rx, TETRA_HALF_TCH, TETRA_HALF_TCH);
             return;
         }
@@ -179,7 +184,8 @@ static void process_dnb(struct tetra_dmo_rx *rx, uint32_t s, bool train_n)
     if (rx->traffic && h2 == TETRA_HALF_TCH) {
         memset(rx->tch, 0, 216);
         rxcore_copy(&rx->core, s + DMO_DNB_BLK2, rx->tch + 216, 216);
-        tetra_descramble_soft(rx->tch + 216, 216, tetra_scramb_init(rx->dcc));
+        lmac_descramble(&rx->ws, rx->tch + 216, 216,
+                        tetra_scramb_init(rx->dcc));
         dmo_traffic(rx, h1, h2);
     }
 }
@@ -194,10 +200,15 @@ static void locked_slot(struct tetra_dmo_rx *rx)
      */
     bool dnb_slot = rx->t.tn == 1;
 
-    for (int off = -TIMING_SEARCH; off <= TIMING_SEARCH; off += 2) {
+    for (unsigned i = 0; i < sizeof(search_order); i++) {
+        int off = search_order[i];
         uint32_t s = rx->slot_start + (uint32_t)off;
-        int cn = -2000, cp = -2000;
-        int cy = rxcore_corr(&rx->core, s + DMO_DSB_TRAIN, tetra_seq_y, 38);
+        int cn = -2000, cp = -2000, cy;
+
+        /* Timing usually holds: stop at a clear match. */
+        if (best >= TRAIN_SURE)
+            break;
+        cy = rxcore_corr(&rx->core, s + DMO_DSB_TRAIN, tetra_seq_y, 38);
 
         if (dnb_slot) {
             cn = rxcore_corr(&rx->core, s + DMO_DNB_TRAIN, tetra_seq_n, 22);

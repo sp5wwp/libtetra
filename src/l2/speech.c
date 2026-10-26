@@ -33,16 +33,6 @@ static const uint8_t speech_order[TETRA_SPEECH_BITS] = {
 #define CLASS1_BITS 56
 #define CLASS2_BITS 30
 
-/*
- * Rate 1/3 mother code (clause 5.4.3.1): output bits (V1 in bit 2) for each
- * register value, generators 1+D+D2+D3+D4, 1+D+D3+D4 and 1+D2+D4.
- */
-static const uint8_t out3[32] = {
-    0x0, 0x7, 0x6, 0x1, 0x5, 0x2, 0x3, 0x4, 0x6, 0x1, 0x0,
-    0x7, 0x3, 0x4, 0x5, 0x2, 0x7, 0x0, 0x1, 0x6, 0x2, 0x5,
-    0x4, 0x3, 0x1, 0x6, 0x7, 0x0, 0x4, 0x3, 0x2, 0x5,
-};
-
 struct punct {
     const uint8_t *p;
     uint8_t t;
@@ -201,7 +191,7 @@ static void encode_t3(const struct layout *l, const uint8_t *t2, uint8_t *t3)
     memcpy(t3, t2, l->k_class0);
     for (unsigned k = 0; k < k2; k++) {
         unsigned r = ((unsigned)in[k] << 4) | s;
-        uint8_t o = out3[r];
+        uint8_t o = conv_out3(r);
 
         mother[3 * k] = (o >> 2) & 1;
         mother[3 * k + 1] = (o >> 1) & 1;
@@ -236,7 +226,7 @@ static void decode_t3(const struct layout *l, struct tetra_speech_ws *ws)
     for (unsigned j = 1; j <= l->n3_class2; j++)
         m2[punct_index(l->punct2, j)] = c2[j - 1];
 
-    viterbi_core(ws->mother, 3, out3, k2, &ws->t2[l->k_class0], ws->dec);
+    viterbi_speech(ws->mother, k2, &ws->t2[l->k_class0], ws->dec);
 }
 
 /* Matrix interleaving of clause 5.5.3: C4(i * 24 + j) = C3(j * 18 + i). */

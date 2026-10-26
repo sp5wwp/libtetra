@@ -157,6 +157,19 @@ void tetra_scramble(uint8_t *bits, unsigned n, uint32_t init)
         bits[i] ^= (uint8_t)scramb_next(&s);
 }
 
+void tetra_scramb_words(uint32_t init, uint32_t *words, unsigned n)
+{
+    uint32_t s = init;
+
+    for (unsigned w = 0; w < n; w++) {
+        uint32_t v = 0;
+
+        for (unsigned i = 0; i < 32; i++)
+            v = (v << 1) | scramb_next(&s);
+        words[w] = v;
+    }
+}
+
 void tetra_descramble_soft(int8_t *soft, unsigned n, uint32_t init)
 {
     uint32_t s = init;
@@ -255,9 +268,11 @@ void tetra_soft_to_bits(const int8_t *soft, uint8_t *bits, unsigned n)
 
 void tetra_pack_bits(const uint8_t *bits, unsigned n, uint8_t *out)
 {
-    memset(out, 0, (n + 7) / 8);
-    for (unsigned i = 0; i < n; i++) {
-        if (bits[i])
-            out[i >> 3] |= (uint8_t)(0x80 >> (i & 7));
+    for (unsigned i = 0; i < n; i += 8) {
+        unsigned v = 0;
+
+        for (unsigned b = 0; b < 8; b++)
+            v = (v << 1) | (i + b < n && bits[i + b]);
+        out[i >> 3] = (uint8_t)v;
     }
 }

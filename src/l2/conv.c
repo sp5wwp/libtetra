@@ -24,6 +24,22 @@ static const uint8_t out_tab[32] = {
     0xc, 0x3, 0x4, 0xb, 0x1, 0xe, 0x2, 0xd, 0x7, 0x8,
 };
 
+/*
+ * Rate 1/3 speech mother code, EN 300 395-2 clause 5.4.3.1: output bits (G1 in
+ * bit 2) for each register value, generators 1+D+D2+D3+D4, 1+D+D3+D4 and
+ * 1+D2+D4.
+ */
+static const uint8_t out3_tab[32] = {
+    0x0, 0x7, 0x6, 0x1, 0x5, 0x2, 0x3, 0x4, 0x6, 0x1, 0x0,
+    0x7, 0x3, 0x4, 0x5, 0x2, 0x7, 0x0, 0x1, 0x6, 0x2, 0x5,
+    0x4, 0x3, 0x1, 0x6, 0x7, 0x0, 0x4, 0x3, 0x2, 0x5,
+};
+
+uint8_t conv_out3(unsigned r)
+{
+    return out3_tab[r & 0x1f];
+}
+
 static inline uint8_t conv_out(unsigned r)
 {
     return out_tab[r & 0x1f];
@@ -89,6 +105,16 @@ void tetra_depuncture(enum tetra_punct p, const int8_t *in, unsigned k3,
     const struct punct_def *d = &punct_defs[p];
 
     memset(mother, 0, 4 * k2);
+    if (p == TETRA_PUNCT_2_3) {
+        /* P = {1, 2, 5}: three type-3 bits per 8 mother bits */
+        for (unsigned j = 0, i = 0; j + 2 < k3 && i + 4 < 4 * k2;
+             j += 3, i += 8) {
+            mother[i] = in[j];
+            mother[i + 1] = in[j + 1];
+            mother[i + 4] = in[j + 2];
+        }
+        return;
+    }
     for (unsigned j = 1; j <= k3; j++) {
         unsigned idx = punct_index(d, j);
 
@@ -109,7 +135,7 @@ int tetra_viterbi_buf(const int8_t *mother, unsigned k2, uint8_t *out,
 {
     if (k2 > TETRA_VITERBI_MAX_K2)
         return -1;
-    viterbi_core(mother, 4, out_tab, k2, out, dec);
+    viterbi_rcpc(mother, k2, out, dec);
     return 0;
 }
 
@@ -119,9 +145,11 @@ int tetra_viterbi_buf(const int8_t *mother, unsigned k2, uint8_t *out,
  * the trellis splits into 8 butterflies with one branch metric each.
  * Path metrics grow by at most nout * 128 per step, so int32 metrics need
  * no normalisation for blocks up to TETRA_VITERBI_MAX_K2 steps.
+ * Inlined once per code so that nout and the output table are constants.
  */
-void viterbi_core(const int8_t *mother, unsigned nout, const uint8_t *tab,
-                  unsigned k2, uint8_t *out, uint16_t *dec)
+static inline __attribute__((always_inline)) void
+viterbi(const int8_t *mother, unsigned nout, const uint8_t *tab, unsigned k2,
+        uint8_t *out, uint16_t *dec)
 {
     int32_t buf[2][16];
     int32_t *pm = buf[0], *npm = buf[1];
@@ -150,6 +178,7 @@ void viterbi_core(const int8_t *mother, unsigned nout, const uint8_t *tab,
         lo[0] = -lo[3];
 
         /* States j and j + 8 both come from 2j and 2j + 1. */
+#pragma GCC unroll 8
         for (unsigned j = 0; j < 8; j++) {
             unsigned o = tab[2 * j];
             int32_t m = hi[o >> 2] + lo[o & 3];
@@ -185,4 +214,16 @@ void viterbi_core(const int8_t *mother, unsigned nout, const uint8_t *tab,
         out[k] = (uint8_t)(n >> 3);
         n = ((n << 1) & 0xf) | bit;
     }
+}
+
+void viterbi_rcpc(const int8_t *mother, unsigned k2, uint8_t *out,
+                  uint16_t *dec)
+{
+    viterbi(mother, 4, out_tab, k2, out, dec);
+}
+
+void viterbi_speech(const int8_t *mother, unsigned k2, uint8_t *out,
+                    uint16_t *dec)
+{
+    viterbi(mother, 3, out3_tab, k2, out, dec);
 }

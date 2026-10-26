@@ -192,6 +192,15 @@ void tetra_scramble(uint8_t *bits, unsigned n, uint32_t init);
 void tetra_descramble_soft(int8_t *soft, unsigned n, uint32_t init);
 
 /**
+ * \brief Scrambling sequence as packed bits.
+ *
+ * @param init: value from tetra_scramb_init().
+ * @param words: output, sequence bit i in bit 31 - i % 32 of words[i / 32].
+ * @param n: number of 32-bit words.
+ */
+void tetra_scramb_words(uint32_t init, uint32_t *words, unsigned n);
+
+/**
  * \brief TMO extended colour code from MCC, MNC and colour code.
  *
  * @param mcc: mobile country code (10 bits).
