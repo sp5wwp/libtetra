@@ -233,8 +233,21 @@ struct tetra_rx_config {
 
 /* ---- Internal state shared by the receivers. Treat as opaque. ---- */
 
-/** Soft bit history; must be a power of two. */
+/**
+ * Soft bit history. Must be a power of two and hold a slot (510 bits) plus
+ * the timing search window, so 1024 is the smallest valid size.
+ */
 #define TETRA_RING_BITS 1024
+
+#ifdef __cplusplus
+static_assert((TETRA_RING_BITS & (TETRA_RING_BITS - 1)) == 0,
+              "TETRA_RING_BITS must be a power of two");
+static_assert(TETRA_RING_BITS >= 1024, "TETRA_RING_BITS too small");
+#else
+_Static_assert((TETRA_RING_BITS & (TETRA_RING_BITS - 1)) == 0,
+               "TETRA_RING_BITS must be a power of two");
+_Static_assert(TETRA_RING_BITS >= 1024, "TETRA_RING_BITS too small");
+#endif
 
 struct tetra_rxcore {
     int8_t ring[TETRA_RING_BITS];
