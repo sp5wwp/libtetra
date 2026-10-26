@@ -55,7 +55,8 @@ extern const uint8_t tetra_dmo_p3[12];
 #define DMO_DSB_BLK2 (DMO_BURST_START + 252)
 
 /** Number of set bits, without a loop or table. */
-static inline unsigned tetra_popcount32(uint32_t v)
+static inline __attribute__((always_inline)) unsigned
+tetra_popcount32(uint32_t v)
 {
     v = v - ((v >> 1) & 0x55555555u);
     v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
@@ -71,6 +72,17 @@ static inline void rxcore_push(struct tetra_rxcore *c, int8_t s)
     c->wr++;
 }
 
+/** True if the last 38 received bits match y within TETRA_SYNC_MAX_ERRORS. */
+static inline bool rxcore_sync_hit(const struct tetra_rxcore *c)
+{
+    uint64_t d = (c->hard_sr ^ TETRA_SEQ_Y_WORD) & TETRA_SEQ_Y_MASK;
+    unsigned e = tetra_popcount32((uint32_t)d);
+
+    if (e > TETRA_SYNC_MAX_ERRORS)
+        return false;
+    return e + tetra_popcount32((uint32_t)(d >> 32)) <= TETRA_SYNC_MAX_ERRORS;
+}
+
 /** Soft bit at absolute index (must still be in the history). */
 static inline int8_t rxcore_at(const struct tetra_rxcore *c, uint32_t idx)
 {
@@ -80,9 +92,6 @@ static inline int8_t rxcore_at(const struct tetra_rxcore *c, uint32_t idx)
 /** Copy n soft bits starting at absolute index idx. */
 void rxcore_copy(const struct tetra_rxcore *c, uint32_t idx, int8_t *out,
                  unsigned n);
-
-/** Number of bit errors of the last 38 received bits against y. */
-unsigned rxcore_sync_errors(const struct tetra_rxcore *c);
 
 /**
  * Soft correlation of a reference sequence at absolute index idx,

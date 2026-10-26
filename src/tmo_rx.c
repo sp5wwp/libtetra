@@ -336,7 +336,7 @@ static void ul_detect(struct tetra_tmo_rx *rx)
         ul->score = 0;
         ul->reported = false;
     }
-    if (rxcore_sync_errors(&rx->core) <= TETRA_SYNC_MAX_ERRORS)
+    if (rxcore_sync_hit(&rx->core))
         ul->last_dl = wr;
     else if (seq_errors(sr, UL_SEQ_X, 30) <= 2)
         hit = true;
@@ -366,36 +366,35 @@ static void ul_detect(struct tetra_tmo_rx *rx)
 }
 #endif
 
-static void push_one(struct tetra_tmo_rx *rx, int8_t s)
+/* Not synchronised: look for the sync burst (and uplink bursts). */
+static __attribute__((noinline)) void search(struct tetra_tmo_rx *rx)
 {
-    rxcore_push(&rx->core, s);
-
-    if (!rx->locked) {
 #if TETRA_UPLINK_DETECT
-        ul_detect(rx);
+    ul_detect(rx);
 #endif
-        if (!rx->cand &&
-            rxcore_sync_errors(&rx->core) <= TETRA_SYNC_MAX_ERRORS) {
-            /* y38 is the bit just received */
-            rx->cand_start = rx->core.wr - (TMO_SB_TRAIN + 38);
-            rx->cand = true;
-        }
-        if (rx->cand &&
-            rx->core.wr >= rx->cand_start + SLOT_BITS + TIMING_SEARCH) {
-            rx->cand = false;
-            if (decode_bsch(rx, rx->cand_start)) {
-                rx->slot_start = rx->cand_start;
-                rx->bad_slots = 0;
-                set_lock(rx, true);
-                /* decode_bsch() set the time; handle the rest of the slot */
-                process_slot(rx, rx->slot_start, true, false);
-                rx->slot_start += SLOT_BITS;
-                advance_time(rx);
-            }
-        }
-        return;
+    if (!rx->cand && rxcore_sync_hit(&rx->core)) {
+        /* y38 is the bit just received */
+        rx->cand_start = rx->core.wr - (TMO_SB_TRAIN + 38);
+        rx->cand = true;
     }
+}
 
+static __attribute__((noinline)) void cand_check(struct tetra_tmo_rx *rx)
+{
+    rx->cand = false;
+    if (decode_bsch(rx, rx->cand_start)) {
+        rx->slot_start = rx->cand_start;
+        rx->bad_slots = 0;
+        set_lock(rx, true);
+        /* decode_bsch() set the time; handle the rest of the slot */
+        process_slot(rx, rx->slot_start, true, false);
+        rx->slot_start += SLOT_BITS;
+        advance_time(rx);
+    }
+}
+
+static __attribute__((noinline)) void slots_due(struct tetra_tmo_rx *rx)
+{
     while (rx->locked &&
            rx->core.wr >= rx->slot_start + SLOT_BITS + 2 * TIMING_SEARCH) {
         locked_slot(rx);
@@ -404,6 +403,21 @@ static void push_one(struct tetra_tmo_rx *rx, int8_t s)
         rx->slot_start += SLOT_BITS;
         advance_time(rx);
     }
+}
+
+/* Per bit fast path. The rare work is kept out of line. */
+static inline void push_one(struct tetra_tmo_rx *rx, int8_t s)
+{
+    rxcore_push(&rx->core, s);
+
+    if (rx->locked) {
+        if (rx->core.wr >= rx->slot_start + SLOT_BITS + 2 * TIMING_SEARCH)
+            slots_due(rx);
+        return;
+    }
+    search(rx);
+    if (rx->cand && rx->core.wr >= rx->cand_start + SLOT_BITS + TIMING_SEARCH)
+        cand_check(rx);
 }
 
 void tetra_tmo_push_soft(struct tetra_tmo_rx *rx, const int8_t *soft, size_t n)

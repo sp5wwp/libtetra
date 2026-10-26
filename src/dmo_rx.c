@@ -251,29 +251,31 @@ static bool misaligned(const struct tetra_dmo_rx *rx, uint32_t s)
     return d > TIMING_SEARCH && d < SLOT_BITS - TIMING_SEARCH;
 }
 
-static void push_one(struct tetra_dmo_rx *rx, int8_t s)
+/* Sync sequence found: start a candidate unless it fits the timing. */
+static __attribute__((noinline)) void sync_hit(struct tetra_dmo_rx *rx)
 {
-    rxcore_push(&rx->core, s);
+    uint32_t cs = rx->core.wr - (DMO_DSB_TRAIN + 38);
 
-    if (!rx->cand && rxcore_sync_errors(&rx->core) <= TETRA_SYNC_MAX_ERRORS) {
-        uint32_t cs = rx->core.wr - (DMO_DSB_TRAIN + 38);
-
-        if (!rx->locked || misaligned(rx, cs)) {
-            rx->cand_start = cs;
-            rx->cand = true;
-        }
+    if (!rx->locked || misaligned(rx, cs)) {
+        rx->cand_start = cs;
+        rx->cand = true;
     }
-    if (rx->cand &&
-        rx->core.wr >= rx->cand_start + SLOT_BITS + 2 * TIMING_SEARCH) {
-        rx->cand = false;
-        if (decode_sch_s(rx, rx->cand_start)) {
-            /* New timing reference: the locked loop handles the slot. */
-            rx->slot_start = rx->cand_start;
-            rx->idle_slots = 0;
-            set_lock(rx, true);
-        }
-    }
+}
 
+/* Candidate complete: try its SCH/S. */
+static __attribute__((noinline)) void cand_check(struct tetra_dmo_rx *rx)
+{
+    rx->cand = false;
+    if (decode_sch_s(rx, rx->cand_start)) {
+        /* New timing reference: the locked loop handles the slot. */
+        rx->slot_start = rx->cand_start;
+        rx->idle_slots = 0;
+        set_lock(rx, true);
+    }
+}
+
+static __attribute__((noinline)) void slots_due(struct tetra_dmo_rx *rx)
+{
     while (rx->locked &&
            rx->core.wr >= rx->slot_start + SLOT_BITS + 2 * TIMING_SEARCH) {
         locked_slot(rx);
@@ -282,6 +284,21 @@ static void push_one(struct tetra_dmo_rx *rx, int8_t s)
         rx->slot_start += SLOT_BITS;
         advance_time(rx);
     }
+}
+
+/* Per bit fast path. The rare work is kept out of line. */
+static inline void push_one(struct tetra_dmo_rx *rx, int8_t s)
+{
+    rxcore_push(&rx->core, s);
+
+    if (!rx->cand && rxcore_sync_hit(&rx->core))
+        sync_hit(rx);
+    if (rx->cand &&
+        rx->core.wr >= rx->cand_start + SLOT_BITS + 2 * TIMING_SEARCH)
+        cand_check(rx);
+    if (rx->locked &&
+        rx->core.wr >= rx->slot_start + SLOT_BITS + 2 * TIMING_SEARCH)
+        slots_due(rx);
 }
 
 void tetra_dmo_push_soft(struct tetra_dmo_rx *rx, const int8_t *soft, size_t n)
