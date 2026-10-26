@@ -62,6 +62,48 @@ static void print_time(const struct tetra_event *ev)
         printf("[%02u/%u] ", ev->time.fn, ev->time.tn);
 }
 
+/* Degrees in 1e-7 units as text. */
+static void print_e7(const char *name, int32_t v)
+{
+    unsigned a = (unsigned)(v < 0 ? -(int64_t)v : v);
+
+    printf(" %s %s%u.%07u", name, v < 0 ? "-" : "", a / 10000000u,
+           a % 10000000u);
+}
+
+static void print_lip(const struct tetra_lip *l)
+{
+    static const char *kind[] = { "short report", "long report", "PDU" };
+
+    printf("LIP %s", kind[l->kind]);
+    if (l->kind == TETRA_LIP_OTHER) {
+        printf(" type %u\n", l->pdu_ext);
+        return;
+    }
+    if (l->has_position) {
+        print_e7("lat", l->lat_e7);
+        print_e7("lon", l->lon_e7);
+    } else {
+        printf(" no position");
+    }
+    if (l->h_uncertainty != TETRA_LIP_NONE)
+        printf(" +-%u m", tetra_lip_uncertainty_m(l->h_uncertainty));
+    if (l->position_error != TETRA_LIP_NONE)
+        printf(" error %u", l->position_error);
+    if (l->has_altitude)
+        printf(" alt %d m", l->altitude_m);
+    if (l->speed_dkmh < 0xfffe)
+        printf(" speed %u.%u km/h", l->speed_dkmh / 10, l->speed_dkmh % 10);
+    if (l->direction_ddeg != 0xffff)
+        printf(" heading %u.%u", l->direction_ddeg / 10,
+               l->direction_ddeg % 10);
+    if (l->reason != 0xffff)
+        printf(" reason %u", l->reason);
+    if (l->id_ssi)
+        printf(" ssi %u", l->id_ssi);
+    printf("\n");
+}
+
 static void print_sds(const struct tetra_sds *s)
 {
     struct tetra_sds_text t;
@@ -84,7 +126,12 @@ static void print_sds(const struct tetra_sds *s)
         return;
     }
     struct tetra_sds_location l;
+    struct tetra_lip lip;
 
+    if (tetra_sds_parse_lip(s, &lip) == 0) {
+        print_lip(&lip);
+        return;
+    }
     if (tetra_sds_parse_location(s, &l) == 0) {
         if (l.coding == TETRA_LCS_NMEA &&
             tetra_sds_location_ascii(&l, txt, sizeof(txt)) >= 0)

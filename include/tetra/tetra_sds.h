@@ -110,6 +110,113 @@ int tetra_sds_parse_location(const struct tetra_sds *sds,
 int tetra_sds_location_ascii(const struct tetra_sds_location *l, char *out,
                              size_t len);
 
+/* ---- Location Information Protocol, ETSI TS 100 392-18-1 ---- */
+
+/** LIP PDU kinds. */
+enum tetra_lip_kind {
+    TETRA_LIP_SHORT_REPORT = 0, /**< SHORT LOCATION REPORT. */
+    TETRA_LIP_LONG_REPORT,      /**< LONG LOCATION REPORT. */
+    TETRA_LIP_OTHER,            /**< Any other LIP PDU, see pdu_ext. */
+};
+
+/** Location shapes, table 6.79. */
+enum tetra_lip_shape {
+    TETRA_LIP_NO_SHAPE = 0,
+    TETRA_LIP_POINT,
+    TETRA_LIP_CIRCLE,
+    TETRA_LIP_ELLIPSE,
+    TETRA_LIP_POINT_ALT,
+    TETRA_LIP_CIRCLE_ALT,
+    TETRA_LIP_ELLIPSE_ALT,
+    TETRA_LIP_CIRCLE_ALT_UNC,
+    TETRA_LIP_ELLIPSE_ALT_UNC,
+    TETRA_LIP_ARC,
+    TETRA_LIP_POINT_ERROR,
+};
+
+/** Value of the code fields below when the element is absent. */
+#define TETRA_LIP_NONE 0xff
+
+/**
+ * Decoded LIP PDU. Codes are the raw values of the tables in
+ * TS 100 392-18-1; quantities with a unit are converted.
+ */
+struct tetra_lip {
+    enum tetra_lip_kind kind;
+    uint8_t pdu_ext; /**< PDU type extension (table 6.92), long PDUs. */
+
+    /* Time: short reports and long reports with time type 1 give the
+     * time elapsed, long reports with time type 2 the time of position. */
+    uint8_t time_elapsed; /**< Table 6.111 code, TETRA_LIP_NONE if absent. */
+    bool has_time_of_position;
+    uint8_t day, hour, minute, second; /**< UTC. */
+
+    /* Location */
+    uint8_t shape; /**< enum tetra_lip_shape (long reports). */
+    bool has_position;
+    int32_t lat_e7;         /**< Latitude in 1e-7 degrees, north positive. */
+    int32_t lon_e7;         /**< Longitude in 1e-7 degrees, east positive. */
+    uint8_t position_error; /**< Table 6.93 code, TETRA_LIP_NONE. */
+    uint8_t h_uncertainty;  /**< Table 6.49 code: circle radius or half
+                                 major axis, TETRA_LIP_NONE. */
+    uint8_t h_uncertainty_minor; /**< Ellipse: half minor axis code. */
+    uint16_t angle_ddeg;  /**< Ellipse orientation, arc start (0.1 deg). */
+    uint16_t angle2_ddeg; /**< Arc stop angle (0.1 deg). */
+    uint32_t inner_radius_m, outer_radius_m; /**< Arc. */
+    uint8_t confidence; /**< Table 6.43 code, TETRA_LIP_NONE. */
+    bool has_altitude;
+    bool altitude_user; /**< User defined reference, else WGS84. */
+    int16_t altitude_m;
+    uint8_t altitude_uncertainty; /**< Table 6.63 code, TETRA_LIP_NONE. */
+
+    /* Velocity */
+    uint16_t speed_dkmh;        /**< Horizontal speed in 0.1 km/h, 0xffff if not
+                                     known, 0xfffe above 1043 km/h. */
+    int16_t vspeed_dkmh;        /**< Vertical speed in 0.1 km/h, up positive,
+                                     INT16_MIN if absent or not known. */
+    uint16_t direction_ddeg;    /**< Direction of travel, 0.1 deg clockwise
+                                     from north, 0xffff if not known. */
+    uint8_t speed_uncertainty;  /**< Table 6.57 code, TETRA_LIP_NONE. */
+    uint8_t vspeed_uncertainty; /**< Table 6.125 code, TETRA_LIP_NONE. */
+    uint8_t direction_uncertainty; /**< Table 6.46 code, TETRA_LIP_NONE. */
+
+    /* Additional data */
+    bool ack_request;
+    uint16_t reason;    /**< Reason for sending (table 6.94), 0xffff. */
+    uint16_t user_data; /**< User defined data, 0xffff if absent. */
+
+    /* Optional (type 5) elements of long reports */
+    uint16_t msg_ref;     /**< Location message reference, 0xffff. */
+    uint16_t result_code; /**< Table 6.98, 0xffff if absent. */
+    bool has_status;
+    uint16_t status; /**< Pre-coded status value. */
+    bool has_sds1;
+    uint16_t sds1;   /**< SDS type-1 value. */
+    uint8_t id_type; /**< Terminal identification type (table 6.32),
+                          TETRA_LIP_NONE if absent. */
+    uint32_t id_ssi; /**< Terminal SSI, 0 if not given. */
+    uint32_t id_mni; /**< Terminal MNI (MCC << 14 | MNC), 0. */
+};
+
+/**
+ * \brief Recognise and decode a LIP message (protocol identifier 0x0a) in
+ * an SDS event.
+ *
+ * @param sds: SDS event of type TETRA_SDS_UDD4.
+ * @param lip: decoded result.
+ * @return 0 if this is a LIP PDU, -1 otherwise.
+ */
+int tetra_sds_parse_lip(const struct tetra_sds *sds, struct tetra_lip *lip);
+
+/**
+ * \brief Horizontal position uncertainty (table 6.49) in metres.
+ *
+ * @param code: uncertainty code 0..62.
+ * @return upper bound of the uncertainty in metres, 0 for code 63 (best
+ * effort) or invalid codes.
+ */
+uint32_t tetra_lip_uncertainty_m(uint8_t code);
+
 #ifdef __cplusplus
 }
 #endif

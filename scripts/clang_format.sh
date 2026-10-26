@@ -34,6 +34,7 @@ FILES=(
     src/l2/speech.c
     src/l2/tmo_mac.c
     src/l3/dmo_cc.c
+    src/l3/lip.c
     src/l3/sds.c
     src/l3/tmo_l3.c
     src/l3/tmo_mle.c
