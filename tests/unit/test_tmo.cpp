@@ -431,6 +431,49 @@ TEST_CASE("TMO receiver handles SYSINFO, association, fragmentation and SDS",
     REQUIRE(c.texts[1] == long_text);
 }
 
+TEST_CASE("TMO receiver decodes selected timeslots only", "[tmo][oracle]")
+{
+    std::vector<uint8_t> dibits;
+    FILE *f = std::fopen(TETRA_TEST_VECTOR_DIR "/tmo_call.dibits", "rb");
+    int ch;
+
+    REQUIRE(f != nullptr);
+    while ((ch = std::fgetc(f)) != EOF) {
+        for (int k = 6; k >= 0; k -= 2)
+            dibits.push_back((uint8_t)((ch >> k) & 3));
+    }
+    std::fclose(f);
+
+    SECTION("call slot only")
+    {
+        static capture c;
+
+        init(c);
+        tetra_tmo_set_slots(&c.rx, TETRA_TS2);
+        tetra_tmo_push_dibits(&c.rx, dibits.data(), dibits.size());
+        REQUIRE(c.locks == 1);
+        REQUIRE(c.cell.mcc == 235);
+        REQUIRE(c.calls.empty());
+        REQUIRE(c.tch.size() == 5);
+        for (unsigned i = 0; i < 5; i++)
+            REQUIRE(c.tch[i] == unpack(osmo_tmo_call_tch[i], 432));
+    }
+
+    SECTION("control channel only")
+    {
+        static capture c;
+
+        init(c);
+        tetra_tmo_set_slots(&c.rx, TETRA_TS1);
+        tetra_tmo_push_dibits(&c.rx, dibits.data(), dibits.size());
+        REQUIRE(c.locks == 1);
+        REQUIRE(c.calls.size() >= 1);
+        REQUIRE(c.calls[0].what == TETRA_CALL_SETUP);
+        REQUIRE(c.calls[0].timeslots == TETRA_TS2);
+        REQUIRE(c.tch.empty());
+    }
+}
+
 /* ---- Uplink recognition ---- */
 
 #if TETRA_UPLINK_DETECT

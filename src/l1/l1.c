@@ -39,13 +39,9 @@ void rxcore_copy(const struct tetra_rxcore *c, uint32_t idx, int8_t *out,
 unsigned rxcore_sync_errors(const struct tetra_rxcore *c)
 {
     uint64_t d = (c->hard_sr ^ TETRA_SEQ_Y_WORD) & TETRA_SEQ_Y_MASK;
-    unsigned cnt = 0;
 
-    while (d) {
-        d &= d - 1;
-        cnt++;
-    }
-    return cnt;
+    return tetra_popcount32((uint32_t)d) +
+           tetra_popcount32((uint32_t)(d >> 32));
 }
 
 int rxcore_corr(const struct tetra_rxcore *c, uint32_t idx, const uint8_t *seq,

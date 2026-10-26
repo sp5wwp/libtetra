@@ -54,6 +54,15 @@ extern const uint8_t tetra_dmo_p3[12];
 #define DMO_DSB_TRAIN (DMO_BURST_START + 214)
 #define DMO_DSB_BLK2 (DMO_BURST_START + 252)
 
+/** Number of set bits, without a loop or table. */
+static inline unsigned tetra_popcount32(uint32_t v)
+{
+    v = v - ((v >> 1) & 0x55555555u);
+    v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
+    v = (v + (v >> 4)) & 0x0f0f0f0fu;
+    return (v * 0x01010101u) >> 24;
+}
+
 /** Push one soft bit into the history. */
 static inline void rxcore_push(struct tetra_rxcore *c, int8_t s)
 {

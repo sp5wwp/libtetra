@@ -30,6 +30,13 @@ enum tetra_event_type {
     TETRA_EV_SIGNAL,   /**< Recognised signal that cannot be decoded. */
 };
 
+/** Timeslot bitmaps, as in tetra_call.timeslots. */
+#define TETRA_TS1 0x01
+#define TETRA_TS2 0x02
+#define TETRA_TS3 0x04
+#define TETRA_TS4 0x08
+#define TETRA_TS_ALL 0x0f
+
 /** Position in the TDMA structure. */
 struct tetra_time {
     uint8_t tn; /**< Timeslot number 1..4. */

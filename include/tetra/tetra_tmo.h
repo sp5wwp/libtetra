@@ -67,6 +67,7 @@ struct tetra_tmo_rx {
     struct tetra_lmac_ws ws;
     bool locked;
     bool cand;
+    uint8_t slots;
     uint16_t bad_slots;
     uint32_t slot_start;
     uint32_t cand_start;
@@ -119,6 +120,20 @@ void tetra_tmo_push_soft(struct tetra_tmo_rx *rx, const int8_t *soft, size_t n);
  */
 void tetra_tmo_push_bits(struct tetra_tmo_rx *rx, const uint8_t *bits,
                          size_t n);
+
+/**
+ * \brief Select the timeslots whose signalling and traffic are decoded.
+ *
+ * Synchronisation bursts are always decoded. Deselecting slots saves CPU
+ * time, for example decoding only the slots of a followed call, which are
+ * reported in tetra_call.timeslots. Calls seen only on deselected slots
+ * time out after a hyperframe. Takes effect from the next slot and may be
+ * called from the event callback.
+ *
+ * @param rx: receiver context.
+ * @param mask: TETRA_TS1..TETRA_TS4 combined, TETRA_TS_ALL by default.
+ */
+void tetra_tmo_set_slots(struct tetra_tmo_rx *rx, uint8_t mask);
 
 /**
  * \brief Current cell information.

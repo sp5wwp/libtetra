@@ -44,7 +44,13 @@ void tetra_tmo_init(struct tetra_tmo_rx *rx, const struct tetra_rx_config *cfg)
 {
     memset(rx, 0, sizeof(*rx));
     rx->cfg = *cfg;
+    rx->slots = TETRA_TS_ALL;
     memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
+}
+
+void tetra_tmo_set_slots(struct tetra_tmo_rx *rx, uint8_t mask)
+{
+    rx->slots = mask & TETRA_TS_ALL;
 }
 
 const struct tetra_cell *tetra_tmo_cell(const struct tetra_tmo_rx *rx)
@@ -189,7 +195,17 @@ static void process_stolen(struct tetra_tmo_rx *rx, uint32_t s, uint8_t um)
 static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
                          bool train_n)
 {
-    uint8_t um = decode_aach(rx, s, sb);
+    uint8_t um;
+
+    /* Deselected slots: only synchronisation bursts keep the timing. */
+    if (!(rx->slots & (1u << (rx->t.tn - 1)))) {
+        rx->dl_um[rx->t.tn - 1] = 0xff;
+        rx->frag[rx->t.tn - 1].active = false;
+        if (sb)
+            decode_bsch(rx, s);
+        return;
+    }
+    um = decode_aach(rx, s, sb);
     bool traffic = um != 0xff && um != 0xfe && um >= 4;
 
     rx->dl_um[rx->t.tn - 1] = um;
@@ -282,16 +298,9 @@ static void locked_slot(struct tetra_tmo_rx *rx)
 #define UL_GAP 360000u
 #define UL_SCORE 4
 
-static unsigned seq_errors(uint64_t sr, uint32_t word, unsigned n)
+static unsigned seq_errors(uint32_t sr, uint32_t word, unsigned n)
 {
-    uint64_t d = (sr ^ word) & ((1ull << n) - 1);
-    unsigned cnt = 0;
-
-    while (d) {
-        d &= d - 1;
-        cnt++;
-    }
-    return cnt;
+    return tetra_popcount32((sr ^ word) & ((1u << n) - 1));
 }
 
 /* n/p hit ending at bit count wr: true if it looks like an uplink burst. */
@@ -319,7 +328,7 @@ static bool ul_np_hit(struct tetra_tmo_uldet *ul, const struct tetra_rxcore *c,
 static void ul_detect(struct tetra_tmo_rx *rx)
 {
     struct tetra_tmo_uldet *ul = &rx->ul;
-    uint64_t sr = rx->core.hard_sr;
+    uint32_t sr = (uint32_t)rx->core.hard_sr;
     uint32_t wr = rx->core.wr;
     bool hit = false;
 

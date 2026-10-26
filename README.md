@@ -72,6 +72,17 @@ for (int f = 0; f < 2; f++)
     oa_dec_frame(&dec, sp.bits[f], sp.bfi[f], pcm); /* 240 samples each */
 ```
 
+To save CPU time while following a TMO call, decode only its timeslots:
+
+```c
+case TETRA_EV_CALL:
+    if (ev->u.call.what == TETRA_CALL_CONNECT)
+        tetra_tmo_set_slots(&rx, ev->u.call.timeslots);
+    else if (ev->u.call.what == TETRA_CALL_RELEASE)
+        tetra_tmo_set_slots(&rx, TETRA_TS_ALL);
+    break;
+```
+
 ## Footprint
 
 About 17 KB of flash. RAM is the context: 5.3 KB (DMO) or 6.5 KB (TMO),

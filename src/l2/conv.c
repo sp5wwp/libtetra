@@ -113,56 +113,67 @@ int tetra_viterbi_buf(const int8_t *mother, unsigned k2, uint8_t *out,
     return 0;
 }
 
+/*
+ * Every generator taps both ends of the register, so the two branches
+ * leaving a state and the two entering one carry complementary outputs:
+ * the trellis splits into 8 butterflies with one branch metric each.
+ * Path metrics grow by at most nout * 128 per step, so int32 metrics need
+ * no normalisation for blocks up to TETRA_VITERBI_MAX_K2 steps.
+ */
 void viterbi_core(const int8_t *mother, unsigned nout, const uint8_t *tab,
                   unsigned k2, uint8_t *out, uint16_t *dec)
 {
-    /* dec holds one decision bit per state per step. */
-    int32_t pm[16], npm[16];
-    unsigned ncomb = 1u << nout;
+    int32_t buf[2][16];
+    int32_t *pm = buf[0], *npm = buf[1];
 
     for (unsigned s = 0; s < 16; s++)
         pm[s] = (s == 0) ? 0 : -(1 << 24);
 
     for (unsigned k = 0; k < k2; k++) {
         const int8_t *v = &mother[nout * k];
-        /* Correlation metric for each combination of output bits. */
-        int32_t bm[16];
-        uint16_t d = 0;
+        int32_t hi[4], lo[4];
+        uint32_t d = 0;
 
-        for (unsigned o = 0; o < ncomb; o++) {
-            int32_t m = 0;
-
-            for (unsigned i = 0; i < nout; i++)
-                m += ((o >> (nout - 1 - i)) & 1) ? v[i] : -v[i];
-            bm[o] = m;
+        /* Correlation metric of output o is hi[o >> 2] + lo[o & 3]. */
+        if (nout == 4) {
+            hi[3] = v[0] + v[1];
+            hi[2] = v[0] - v[1];
+        } else {
+            hi[3] = v[0];
+            hi[2] = -v[0];
         }
+        hi[1] = -hi[2];
+        hi[0] = -hi[3];
+        lo[3] = v[nout - 2] + v[nout - 1];
+        lo[2] = v[nout - 2] - v[nout - 1];
+        lo[1] = -lo[2];
+        lo[0] = -lo[3];
 
-        for (unsigned n = 0; n < 16; n++) {
-            /* n = r >> 1 with r = u << 4 | s, so u = n >> 3 */
-            unsigned u = n >> 3;
-            unsigned s0 = (n << 1) & 0xf;
-            unsigned s1 = s0 | 1;
-            int32_t m0 = pm[s0] + bm[tab[(u << 4) | s0]];
-            int32_t m1 = pm[s1] + bm[tab[(u << 4) | s1]];
+        /* States j and j + 8 both come from 2j and 2j + 1. */
+        for (unsigned j = 0; j < 8; j++) {
+            unsigned o = tab[2 * j];
+            int32_t m = hi[o >> 2] + lo[o & 3];
+            int32_t a = pm[2 * j], b = pm[2 * j + 1];
 
-            if (m1 > m0) {
-                npm[n] = m1;
-                d |= (uint16_t)(1u << n);
+            if (b - m > a + m) {
+                npm[j] = b - m;
+                d |= 1u << j;
             } else {
-                npm[n] = m0;
+                npm[j] = a + m;
+            }
+            if (b + m > a - m) {
+                npm[j + 8] = b + m;
+                d |= 0x100u << j;
+            } else {
+                npm[j + 8] = a - m;
             }
         }
-        dec[k] = d;
+        dec[k] = (uint16_t)d;
 
-        /* Keep metrics bounded. */
-        int32_t mx = npm[0];
+        int32_t *t = pm;
 
-        for (unsigned n = 1; n < 16; n++) {
-            if (npm[n] > mx)
-                mx = npm[n];
-        }
-        for (unsigned n = 0; n < 16; n++)
-            pm[n] = npm[n] - mx;
+        pm = npm;
+        npm = t;
     }
 
     /* Trace back from state 0 (tail bits). */
