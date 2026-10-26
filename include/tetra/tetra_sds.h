@@ -4,8 +4,9 @@
 #define TETRA_SDS_H
 
 /*
- * Short data helpers: text messaging over SDS type 4, with or without
- * SDS-TL (EN 300 392-2 clause 29, EN 300 396-3 annex E).
+ * Short data helpers: text messaging and location information over SDS
+ * type 4, with or without SDS-TL (EN 300 392-2 clause 29, EN 300 396-3
+ * annex E).
  */
 
 #include <stddef.h>
@@ -21,6 +22,15 @@ extern "C" {
 #define TETRA_PID_SIMPLE_IMM_TEXT 0x09
 #define TETRA_PID_TEXT 0x82
 #define TETRA_PID_IMM_TEXT 0x89
+
+/** Protocol identifiers carrying location information, table 29.21. */
+#define TETRA_PID_SIMPLE_LOCATION 0x03
+#define TETRA_PID_LIP 0x0a
+#define TETRA_PID_LOCATION 0x83
+
+/** Location system coding schemes, table 29.44. */
+#define TETRA_LCS_NMEA 0x00
+#define TETRA_LCS_RTCM 0x01
 
 /** Text coding schemes, table 29.29 (most common). */
 #define TETRA_TCS_GSM7 0x00
@@ -63,6 +73,42 @@ int tetra_sds_parse_text(const struct tetra_sds *sds, struct tetra_sds_text *t);
  * @return number of bytes written, excluding the terminating NUL.
  */
 int tetra_sds_text_utf8(const struct tetra_sds_text *t, char *out, size_t len);
+
+/** Parsed location system message (simple or over SDS-TL). */
+struct tetra_sds_location {
+    uint8_t protocol_id;
+    bool sdstl;          /**< Carried in an SDS-TL SDS-TRANSFER. */
+    uint8_t msg_ref;     /**< SDS-TL message reference. */
+    uint8_t report_req;  /**< SDS-TL delivery report request. */
+    uint8_t coding;      /**< TETRA_LCS_NMEA, TETRA_LCS_RTCM, ... */
+    const uint8_t *data; /**< Packed buffer holding the location data. */
+    uint16_t start;      /**< First bit of the location data in data. */
+    uint16_t nbits;      /**< Location data length in bits. */
+};
+
+/**
+ * \brief Recognise and parse a location system message (protocol
+ * identifiers 0x03 and 0x83) in an SDS event.
+ *
+ * @param sds: SDS event of type TETRA_SDS_UDD4.
+ * @param l: parsed result; points into sds->data.
+ * @return 0 if this is a location system message, -1 otherwise.
+ */
+int tetra_sds_parse_location(const struct tetra_sds *sds,
+                             struct tetra_sds_location *l);
+
+/**
+ * \brief Copy NMEA location data as NUL terminated ASCII.
+ *
+ * Bytes other than printable ASCII, CR and LF are dropped.
+ *
+ * @param l: parsed location system message.
+ * @param out: output buffer.
+ * @param len: size of the output buffer (> 0).
+ * @return number of bytes written, excluding the terminating NUL.
+ */
+int tetra_sds_location_ascii(const struct tetra_sds_location *l, char *out,
+                             size_t len);
 
 #ifdef __cplusplus
 }

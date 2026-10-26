@@ -333,15 +333,21 @@ TEST_CASE("TMO receiver decodes a real downlink recording excerpt",
     REQUIRE(c.cell.have_sysinfo);
     REQUIRE(c.cell.dl_freq_hz == 392512500u);
 
-    REQUIRE(c.calls.size() >= 2);
-    REQUIRE(c.calls[0].what == TETRA_CALL_SETUP);
+    /* D-CALL PROCEEDING to the caller comes before the D-SETUP */
+    REQUIRE(c.calls.size() >= 3);
+    REQUIRE(c.calls[0].what == TETRA_CALL_PROCEEDING);
     REQUIRE(c.calls[0].call_id == 8);
-    REQUIRE(c.calls[0].dst_ssi == 9001);
     REQUIRE(c.calls[0].src_ssi == 320026);
-    REQUIRE(c.calls[0].group);
-    REQUIRE(c.calls[0].usage_marker == 8);
-    REQUIRE(c.calls[0].timeslots == 0x2);
-    REQUIRE(c.calls[1].what == TETRA_CALL_CONNECT);
+    REQUIRE(c.calls[0].status == TETRA_CALL_ST_PROCEEDING);
+    REQUIRE(c.calls[1].what == TETRA_CALL_SETUP);
+    REQUIRE(c.calls[1].call_id == 8);
+    REQUIRE(c.calls[1].dst_ssi == 9001);
+    REQUIRE(c.calls[1].src_ssi == 320026);
+    REQUIRE(c.calls[1].group);
+    REQUIRE(c.calls[1].usage_marker == 8);
+    REQUIRE(c.calls[1].timeslots == 0x2);
+    REQUIRE(c.calls[1].status == TETRA_CALL_ST_NONE);
+    REQUIRE(c.calls[2].what == TETRA_CALL_CONNECT);
 
     /* Traffic identical to osmo-tetra's decoding of the same signal */
     REQUIRE(c.tch.size() == 5);
@@ -467,9 +473,9 @@ TEST_CASE("TMO receiver decodes selected timeslots only", "[tmo][oracle]")
         tetra_tmo_set_slots(&c.rx, TETRA_TS1);
         tetra_tmo_push_dibits(&c.rx, dibits.data(), dibits.size());
         REQUIRE(c.locks == 1);
-        REQUIRE(c.calls.size() >= 1);
-        REQUIRE(c.calls[0].what == TETRA_CALL_SETUP);
-        REQUIRE(c.calls[0].timeslots == TETRA_TS2);
+        REQUIRE(c.calls.size() >= 2);
+        REQUIRE(c.calls[1].what == TETRA_CALL_SETUP);
+        REQUIRE(c.calls[1].timeslots == TETRA_TS2);
         REQUIRE(c.tch.empty());
     }
 }

@@ -119,3 +119,69 @@ TEST_CASE("Non-text protocol identifiers are rejected", "[sds]")
     w.put(0, 16);
     REQUIRE(decode(w) == "<not text>");
 }
+
+namespace
+{
+
+std::string location(const writer &w, struct tetra_sds_location *l)
+{
+    struct tetra_sds s;
+    char out[256];
+
+    std::memset(&s, 0, sizeof(s));
+    s.type = TETRA_SDS_UDD4;
+    s.data = w.b.data();
+    s.nbits = (uint16_t)w.n;
+    if (tetra_sds_parse_location(&s, l) != 0)
+        return "<not location>";
+    REQUIRE(tetra_sds_location_ascii(l, out, sizeof(out)) >= 0);
+    return out;
+}
+
+} // namespace
+
+TEST_CASE("Location system messages carry NMEA sentences", "[sds]")
+{
+    const char *nmea = "$GPGGA,123519,4807.038,N,01131.000,E,1,08*47\r\n";
+    struct tetra_sds_location l;
+
+    SECTION("simple location system")
+    {
+        writer w;
+
+        w.put(TETRA_PID_SIMPLE_LOCATION, 8);
+        w.put(TETRA_LCS_NMEA, 8);
+        for (const char *p = nmea; *p; p++)
+            w.put((uint8_t)*p, 8);
+        REQUIRE(location(w, &l) == nmea);
+        REQUIRE_FALSE(l.sdstl);
+        REQUIRE(l.coding == TETRA_LCS_NMEA);
+    }
+
+    SECTION("location system over SDS-TL")
+    {
+        writer w;
+
+        w.put(TETRA_PID_LOCATION, 8);
+        w.put(0, 4); /* SDS-TRANSFER */
+        w.put(1, 2); /* delivery report request */
+        w.put(0, 2);
+        w.put(42, 8); /* message reference */
+        w.put(TETRA_LCS_NMEA, 8);
+        for (const char *p = nmea; *p; p++)
+            w.put((uint8_t)*p, 8);
+        REQUIRE(location(w, &l) == nmea);
+        REQUIRE(l.sdstl);
+        REQUIRE(l.msg_ref == 42);
+        REQUIRE(l.report_req == 1);
+    }
+
+    SECTION("text is not location")
+    {
+        writer w;
+
+        w.put(TETRA_PID_SIMPLE_TEXT, 8);
+        w.put(0, 8);
+        REQUIRE(location(w, &l) == "<not location>");
+    }
+}

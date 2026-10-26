@@ -31,6 +31,7 @@ add_library(tetra STATIC
     src/l3/dmo_cc.c
     src/l3/sds.c
     src/l3/tmo_l3.c
+    src/l3/tmo_mle.c
     src/tmo_rx.c
     src/util/bits.c
 )
@@ -82,7 +83,7 @@ if(TETRA_BUILD_TESTS)
     enable_testing()
     find_package(Catch2 3 REQUIRED)
 
-    set(TETRA_TESTS coding dmo sds speech tmo)
+    set(TETRA_TESTS coding dmo sds speech tmo tmo_l3)
     foreach(t ${TETRA_TESTS})
         add_executable(test_${t} tests/unit/test_${t}.cpp)
         set_target_properties(test_${t} PROPERTIES CXX_STANDARD 14

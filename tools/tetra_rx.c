@@ -39,8 +39,16 @@ static void write_speech(const struct tetra_traffic *t)
 }
 
 static const char *call_what[] = {
-    "SETUP",      "CONNECT", "TX-GRANTED", "TX-CEASED",
-    "LATE-ENTRY", "INFO",    "RELEASE",
+    "SETUP",        "CONNECT",     "TX-GRANTED", "TX-CEASED",  "LATE-ENTRY",
+    "INFO",         "RELEASE",     "ALERT",      "PROCEEDING", "TX-WAIT",
+    "TX-INTERRUPT", "TX-CONTINUE", "RESTORE",
+};
+
+static const char *mm_what[] = {
+    "LOC-UPDATE-ACCEPT",   "LOC-UPDATE-REJECT",
+    "LOC-UPDATE-COMMAND",  "LOC-UPDATE-PROCEEDING",
+    "GROUP-ATTACH-DETACH", "GROUP-ATTACH-DETACH-ACK",
+    "MM-STATUS",
 };
 
 static const char *chan_state[] = { "FREE", "OCCUPIED", "RESERVED",
@@ -73,6 +81,16 @@ static void print_sds(const struct tetra_sds *s)
         tetra_sds_text_utf8(&t, txt, sizeof(txt)) >= 0) {
         printf("text (pid 0x%02x, tcs %u): \"%s\"\n", t.protocol_id, t.coding,
                txt);
+        return;
+    }
+    struct tetra_sds_location l;
+
+    if (tetra_sds_parse_location(s, &l) == 0) {
+        if (l.coding == TETRA_LCS_NMEA &&
+            tetra_sds_location_ascii(&l, txt, sizeof(txt)) >= 0)
+            printf("location (NMEA): \"%s\"\n", txt);
+        else
+            printf("location (coding %u), %u bits\n", l.coding, l.nbits);
         return;
     }
     printf("UDD4 pid 0x%02x, %u bits\n", s->nbits >= 8 ? s->data[0] : 0,
@@ -122,10 +140,48 @@ static void on_event(void *user, const struct tetra_event *ev)
     case TETRA_EV_CALL: {
         const struct tetra_call *k = &ev->u.call;
 
-        printf("CALL %s id %u um %u ts 0x%x dst %u%s src %u%s cause %u\n",
+        printf("CALL %s id %u um %u ts 0x%x dst %u%s src %u%s cause %u",
                call_what[k->what], k->call_id, k->usage_marker, k->timeslots,
                k->dst_ssi, k->group ? " (group)" : "", k->src_ssi,
                k->encrypted ? " ENCRYPTED" : "", k->cause);
+        if (k->status != TETRA_CALL_ST_NONE)
+            printf(" status %u", k->status);
+        printf("\n");
+        break;
+    }
+    case TETRA_EV_NETWORK: {
+        const struct tetra_network *n = ev->u.network;
+
+        printf("NETWORK load %u reselect 0x%04x", n->load, n->reselect);
+        if (n->has_time && n->time_valid)
+            printf(" time %u+%us offset %d min", n->year, n->utc_s,
+                   n->offset_valid ? n->offset_min : 0);
+        printf(" neighbours %u\n", n->nneighbours);
+        for (unsigned i = 0; i < n->nneighbours; i++) {
+            const struct tetra_neighbour *c = &n->neighbour[i];
+
+            printf("    cell %u carrier %u %u Hz load %u", c->cell_id,
+                   c->main_carrier, c->dl_freq_hz, c->load);
+            if (c->la != 0xffff)
+                printf(" LA %u", c->la);
+            printf("\n");
+        }
+        break;
+    }
+    case TETRA_EV_MM: {
+        const struct tetra_mm *m = ev->u.mm;
+
+        printf("MM %s ssi %u", mm_what[m->type], m->ssi);
+        if (m->new_ssi)
+            printf(" new ssi %u", m->new_ssi);
+        if (m->type == TETRA_MM_LOC_UPDATE_REJECT)
+            printf(" cause %u", m->cause);
+        if (m->la != 0xffff)
+            printf(" LA %u", m->la);
+        for (unsigned i = 0; i < m->ngroups; i++)
+            printf(" %s %u", m->groups[i].detach ? "-" : "+",
+                   m->groups[i].gssi ? m->groups[i].gssi : m->groups[i].vgssi);
+        printf("\n");
         break;
     }
     case TETRA_EV_SDS:

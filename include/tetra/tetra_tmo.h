@@ -42,6 +42,7 @@ struct tetra_tmo_call_state {
     bool encrypted;
     bool connected;
     bool tx_active;
+    uint8_t seen; /* set-up phase events already reported */
     uint8_t usage_marker;
     uint8_t timeslots;
     uint8_t circuit_type;
@@ -67,6 +68,7 @@ struct tetra_tmo_rx {
     struct tetra_lmac_ws ws;
     bool locked;
     bool cand;
+    bool have_network;
     uint8_t slots;
     uint16_t bad_slots;
     uint32_t slot_start;
@@ -74,6 +76,7 @@ struct tetra_tmo_rx {
     struct tetra_time t;
     uint32_t scramb;
     struct tetra_cell cell;
+    struct tetra_network network;
     uint8_t dl_um[4];
     uint8_t blk[2][34];
     int8_t tch[TETRA_TCH_BITS];
@@ -142,6 +145,14 @@ void tetra_tmo_set_slots(struct tetra_tmo_rx *rx, uint8_t mask);
  * @return pointer to the cell data, or NULL if not synchronised yet.
  */
 const struct tetra_cell *tetra_tmo_cell(const struct tetra_tmo_rx *rx);
+
+/**
+ * \brief Last network broadcast (D-NWRK-BROADCAST).
+ *
+ * @param rx: receiver context.
+ * @return pointer to the data, or NULL if none was received yet.
+ */
+const struct tetra_network *tetra_tmo_network(const struct tetra_tmo_rx *rx);
 
 /**
  * \brief Synchronisation state.

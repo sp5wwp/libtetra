@@ -8,6 +8,40 @@
 #include <tetra/tetra_sds.h>
 #include "util/bits.h"
 
+/*
+ * SDS-TRANSFER header up to the user data, table 29.18. Returns false if
+ * the PDU is not an SDS-TRANSFER.
+ */
+static bool sdstl_transfer(struct bitrd *b, uint8_t *report, uint8_t *ref)
+{
+    unsigned fwd;
+
+    if (br_get(b, 4) != 0)
+        return false;
+    *report = (uint8_t)br_get(b, 2);
+    br_skip(b, 1);
+    fwd = br_get(b, 1); /* storage / forward control */
+    *ref = (uint8_t)br_get(b, 8);
+    if (fwd) {
+        unsigned type;
+
+        br_skip(b, 5); /* validity period */
+        type = br_get(b, 3);
+        if (type == 0) {
+            br_skip(b, 8);
+        } else if (type == 1) {
+            br_skip(b, 24);
+        } else if (type == 2) {
+            br_skip(b, 48);
+        } else if (type == 3) {
+            unsigned digits = br_get(b, 8);
+
+            br_skip(b, 4 * (digits + (digits & 1)));
+        }
+    }
+    return !b->err;
+}
+
 int tetra_sds_parse_text(const struct tetra_sds *sds, struct tetra_sds_text *t)
 {
     struct bitrd b;
@@ -29,40 +63,16 @@ int tetra_sds_parse_text(const struct tetra_sds *sds, struct tetra_sds_text *t)
         t->coding = (uint8_t)br_get(&b, 7);
         break;
     case TETRA_PID_TEXT:
-    case TETRA_PID_IMM_TEXT: {
-        unsigned fwd;
-
+    case TETRA_PID_IMM_TEXT:
         t->sdstl = true;
         t->immediate = pid == TETRA_PID_IMM_TEXT;
-        if (br_get(&b, 4) != 0)
-            return -1; /* not SDS-TRANSFER */
-        t->report_req = (uint8_t)br_get(&b, 2);
-        br_skip(&b, 1);
-        fwd = br_get(&b, 1); /* storage / forward control */
-        t->msg_ref = (uint8_t)br_get(&b, 8);
-        if (fwd) {
-            unsigned type;
-
-            br_skip(&b, 5); /* validity period */
-            type = br_get(&b, 3);
-            if (type == 0) {
-                br_skip(&b, 8);
-            } else if (type == 1) {
-                br_skip(&b, 24);
-            } else if (type == 2) {
-                br_skip(&b, 48);
-            } else if (type == 3) {
-                unsigned digits = br_get(&b, 8);
-
-                br_skip(&b, 4 * (digits + (digits & 1)));
-            }
-        }
+        if (!sdstl_transfer(&b, &t->report_req, &t->msg_ref))
+            return -1;
         t->has_timestamp = br_get(&b, 1);
         t->coding = (uint8_t)br_get(&b, 7);
         if (t->has_timestamp)
             t->timestamp = br_get(&b, 24);
         break;
-    }
     default:
         return -1;
     }
@@ -72,6 +82,53 @@ int tetra_sds_parse_text(const struct tetra_sds *sds, struct tetra_sds_text *t)
     t->start = b.pos;
     t->nbits = (uint16_t)br_left(&b);
     return 0;
+}
+
+int tetra_sds_parse_location(const struct tetra_sds *sds,
+                             struct tetra_sds_location *l)
+{
+    struct bitrd b;
+    unsigned pid;
+
+    if (sds->type != TETRA_SDS_UDD4 || !sds->data || sds->nbits < 16)
+        return -1;
+
+    memset(l, 0, sizeof(*l));
+    br_init(&b, sds->data, 0, sds->nbits);
+    pid = br_get(&b, 8);
+    l->protocol_id = (uint8_t)pid;
+    if (pid == TETRA_PID_LOCATION) {
+        l->sdstl = true;
+        if (!sdstl_transfer(&b, &l->report_req, &l->msg_ref))
+            return -1;
+    } else if (pid != TETRA_PID_SIMPLE_LOCATION) {
+        return -1;
+    }
+    l->coding = (uint8_t)br_get(&b, 8);
+    if (b.err)
+        return -1;
+    l->data = sds->data;
+    l->start = b.pos;
+    l->nbits = (uint16_t)br_left(&b);
+    return 0;
+}
+
+int tetra_sds_location_ascii(const struct tetra_sds_location *l, char *out,
+                             size_t len)
+{
+    unsigned n = 0;
+
+    for (unsigned i = 0; i + 8 <= l->nbits && n + 1 < len; i += 8) {
+        unsigned c = 0;
+
+        for (unsigned k = 0; k < 8; k++)
+            c = (c << 1) | bit_at(l->data, l->start + i + k);
+        /* keep printable ASCII, CR and LF of NMEA sentences */
+        if ((c >= 0x20 && c < 0x7f) || c == '\r' || c == '\n')
+            out[n++] = (char)c;
+    }
+    out[n] = '\0';
+    return (int)n;
 }
 
 /* GSM 03.38 default alphabet as Unicode code points. */

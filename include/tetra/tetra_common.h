@@ -28,6 +28,8 @@ enum tetra_event_type {
     TETRA_EV_TRAFFIC,  /**< One traffic slot for the speech codec. */
     TETRA_EV_PDU,      /**< Other layer 2/3 PDU, for monitoring. */
     TETRA_EV_SIGNAL,   /**< Recognised signal that cannot be decoded. */
+    TETRA_EV_NETWORK,  /**< TMO network broadcast (neighbours, time). */
+    TETRA_EV_MM,       /**< TMO mobility management (registration). */
 };
 
 /** Timeslot bitmaps, as in tetra_call.timeslots. */
@@ -80,6 +82,85 @@ struct tetra_cell {
     bool air_encryption;      /**< Cell uses air interface encryption. */
 };
 
+/** Largest number of neighbour cells in one D-NWRK-BROADCAST. */
+#define TETRA_MAX_NEIGHBOURS 7
+
+/** Neighbour cell (EN 300 392-2 clause 18.5.17). */
+struct tetra_neighbour {
+    uint8_t cell_id;
+    uint8_t reselection; /**< Cell reselection types supported, 2 bits. */
+    bool synchronised;   /**< Synchronised to the serving cell. */
+    uint8_t load;        /**< Cell load: 0 unknown, 1 low .. 3 high. */
+    uint16_t main_carrier;
+    bool has_ext; /**< Band, offset and duplex fields are valid. */
+    uint8_t band;
+    uint8_t offset;
+    uint8_t duplex_spacing;
+    bool reverse_operation;
+    uint32_t dl_freq_hz; /**< 0 if the band is not known yet. */
+    uint16_t mcc;        /**< 0xffff: same as the serving cell. */
+    uint16_t mnc;        /**< 0xffff: same as the serving cell. */
+    uint16_t la;         /**< 0xffff: same as the serving cell. */
+    uint8_t tdma_offset; /**< Frame offset, 0xff if not given. */
+};
+
+/** TMO network broadcast, D-NWRK-BROADCAST (clause 18.4.1.4.1). */
+struct tetra_network {
+    uint16_t reselect; /**< Cell re-select parameters, raw 16 bits. */
+    uint8_t load;      /**< Serving cell load: 0 unknown, 1 low .. 3. */
+    bool has_time;     /**< Fields below up to offset_valid are valid. */
+    bool time_valid;   /**< UTC time and year are valid values. */
+    uint16_t year;     /**< For example 2026. */
+    uint32_t utc_s;    /**< UTC seconds since the start of the year. */
+    bool offset_valid;
+    int16_t offset_min; /**< Local time minus UTC, in minutes. */
+    uint8_t nneighbours;
+    struct tetra_neighbour neighbour[TETRA_MAX_NEIGHBOURS];
+};
+
+/** TMO mobility management PDUs reported by TETRA_EV_MM. */
+enum tetra_mm_type {
+    TETRA_MM_LOC_UPDATE_ACCEPT = 0,
+    TETRA_MM_LOC_UPDATE_REJECT,
+    TETRA_MM_LOC_UPDATE_COMMAND,
+    TETRA_MM_LOC_UPDATE_PROCEEDING,
+    TETRA_MM_GROUP_ATTACH_DETACH,     /**< D-ATTACH/DETACH GROUP IDENTITY. */
+    TETRA_MM_GROUP_ATTACH_DETACH_ACK, /**< ... ACKNOWLEDGEMENT. */
+    TETRA_MM_STATUS,                  /**< D-MM STATUS. */
+};
+
+/** Largest number of group identities reported in one MM event. */
+#define TETRA_MM_MAX_GROUPS 16
+
+/** Group identity attached or detached (clause 16.10.22). */
+struct tetra_mm_group {
+    bool detach;
+    uint8_t lifetime; /**< Attach: attachment lifetime, 2 bits. */
+    uint8_t usage;    /**< Attach: class of usage; detach: reason. */
+    uint32_t gssi;    /**< 0 if only a (V)GSSI was given. */
+    uint32_t ext;     /**< Address extension (MNI), 0 if none. */
+    uint32_t vgssi;   /**< Visitor GSSI, 0 if none. */
+};
+
+/** Mobility management event. Valid only during the callback. */
+struct tetra_mm {
+    enum tetra_mm_type type;
+    uint32_t ssi;      /**< Addressed MS (MAC layer address). */
+    bool addressed;    /**< Addressed to our ISSI. */
+    uint8_t lu_type;   /**< Location update (accept) type, 3 bits. */
+    uint8_t cause;     /**< LOC_UPDATE_REJECT: reject cause. */
+    uint8_t status;    /**< MM_STATUS: status downlink, 6 bits. */
+    uint32_t new_ssi;  /**< Assigned (V)ASSI, 0 if none. */
+    uint32_t mni;      /**< Address extension, 0 if none. */
+    uint16_t la;       /**< First new registered LA, 0xffff if none. */
+    bool group_reject; /**< Some group attachment was rejected. */
+    bool detach_all;   /**< Replace all current group attachments. */
+    bool report_req;   /**< A group identity report is requested. */
+    uint8_t ngroups;
+    bool groups_truncated; /**< More than TETRA_MM_MAX_GROUPS given. */
+    struct tetra_mm_group groups[TETRA_MM_MAX_GROUPS];
+};
+
 /** DMO channel states, EN 300 396-3 clause 8.4.2. */
 enum tetra_dmo_chan_state {
     TETRA_DMO_FREE = 0,
@@ -98,13 +179,29 @@ struct tetra_channel {
 
 /** Call control events, common to TMO and DMO. */
 enum tetra_call_what {
-    TETRA_CALL_SETUP = 0,  /**< New call / call set-up. */
-    TETRA_CALL_CONNECT,    /**< Call connected (presence check calls). */
-    TETRA_CALL_TX_GRANTED, /**< A party started transmitting. */
-    TETRA_CALL_TX_CEASED,  /**< Current transmission ended. */
-    TETRA_CALL_LATE_ENTRY, /**< Ongoing call joined (DMO DM-OCCUPIED). */
-    TETRA_CALL_INFO,       /**< Talking party identification update. */
-    TETRA_CALL_RELEASE,    /**< Call released or lost. */
+    TETRA_CALL_SETUP = 0,    /**< New call / call set-up. */
+    TETRA_CALL_CONNECT,      /**< Call connected (presence check calls). */
+    TETRA_CALL_TX_GRANTED,   /**< A party started transmitting. */
+    TETRA_CALL_TX_CEASED,    /**< Current transmission ended. */
+    TETRA_CALL_LATE_ENTRY,   /**< Ongoing call joined (DMO DM-OCCUPIED). */
+    TETRA_CALL_INFO,         /**< Talking party identification update. */
+    TETRA_CALL_RELEASE,      /**< Call released or lost. */
+    TETRA_CALL_ALERT,        /**< TMO: called party is being alerted. */
+    TETRA_CALL_PROCEEDING,   /**< TMO: call set-up is proceeding. */
+    TETRA_CALL_TX_WAIT,      /**< TMO: transmission halted, wait. */
+    TETRA_CALL_TX_INTERRUPT, /**< TMO: transmission given to another. */
+    TETRA_CALL_TX_CONTINUE,  /**< TMO: halted transmission may resume. */
+    TETRA_CALL_RESTORE,      /**< TMO: call restored after a cell change. */
+};
+
+/** TMO call status (EN 300 392-2 table 14.47), tetra_call.status. */
+enum tetra_call_status {
+    TETRA_CALL_ST_PROCEEDING = 0,
+    TETRA_CALL_ST_QUEUED = 1,
+    TETRA_CALL_ST_PAGED = 2,
+    TETRA_CALL_ST_CONTINUE = 3,
+    TETRA_CALL_ST_HANG_TIME_EXPIRED = 4,
+    TETRA_CALL_ST_NONE = 0xff, /**< Not given in this PDU. */
 };
 
 /** Call control event. Address fields are 0 when unknown. */
@@ -123,6 +220,7 @@ struct tetra_call {
     uint8_t priority;     /**< Call priority (TMO 0..15, DMO 0..3). */
     uint8_t circuit_type; /**< 0 = speech, other values = data. */
     uint8_t cause;        /**< Release / disconnect / cease cause. */
+    uint8_t status;       /**< enum tetra_call_status. */
 };
 
 /** Short data payload type. */
@@ -213,6 +311,8 @@ struct tetra_event {
         struct tetra_traffic traffic;
         struct tetra_pdu pdu;
         struct tetra_signal signal;
+        const struct tetra_network *network;
+        const struct tetra_mm *mm;
     } u;
 };
 

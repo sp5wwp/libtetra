@@ -57,6 +57,7 @@ static void emit_call(struct tetra_dmo_rx *rx, enum tetra_call_what what,
     k->priority = rx->priority;
     k->circuit_type = rx->circuit_type;
     k->cause = cause;
+    k->status = TETRA_CALL_ST_NONE;
     dmo_emit(rx, &ev);
 }
 

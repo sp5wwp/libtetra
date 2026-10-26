@@ -61,6 +61,72 @@ void tmo_traffic(struct tetra_tmo_rx *rx, uint8_t um, enum tetra_half h1,
                  enum tetra_half h2);
 void tmo_frame_tick(struct tetra_tmo_rx *rx);
 
+/* ---- Type 2 / type 3 element helpers (annex E) ---- */
+
+struct opt {
+    struct bitrd *b;
+    bool o;
+};
+
+static inline void opt_begin(struct opt *o, struct bitrd *b)
+{
+    o->b = b;
+    o->o = br_left(b) ? br_get(b, 1) : false;
+}
+
+/* P-bit of the next type 2 element. */
+static inline bool opt_p(struct opt *o)
+{
+    if (!o->o || !br_left(o->b))
+        return false;
+    return br_get(o->b, 1);
+}
+
+/* Party address after a type identifier: 1 = SSI, 2 = SSI + extension. */
+static inline uint32_t party_addr(struct bitrd *b, unsigned type, uint32_t *ext)
+{
+    uint32_t ssi = 0;
+
+    if (type == 1 || type == 2)
+        ssi = br_get(b, 24);
+    if (type == 2) {
+        uint32_t e = br_get(b, 24);
+
+        if (ext)
+            *ext = e;
+    }
+    return ssi;
+}
+
+/*
+ * Next type 3/4 element after the type 2 elements: false if the M-bit says
+ * none follows. On success *e is a reader limited to the element body and
+ * b is advanced past it.
+ */
+static inline bool t34_next(struct bitrd *b, unsigned *id, struct bitrd *e)
+{
+    unsigned len;
+
+    if (br_left(b) < 16 || !br_get(b, 1))
+        return false;
+    *id = br_get(b, 4);
+    len = br_get(b, 11);
+    if (b->err || len > br_left(b))
+        return false;
+    br_init(e, b->buf, b->pos, b->pos + len);
+    br_skip(b, len);
+    return true;
+}
+
+/* MLE and MM (src/l3/tmo_mle.c) */
+/* MLE PDU type of D-NWRK-BROADCAST, table 18.85. */
+#define MLE_D_NWRK_BROADCAST 2
+
+/* Return false if the PDU was not decoded (reported as a raw PDU). */
+bool tmo_mle_nwrk(struct tetra_tmo_rx *rx, struct bitrd *b);
+bool tmo_mm(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
+            struct bitrd *b);
+
 /* Helpers (src/tmo_rx.c) */
 void tmo_emit(struct tetra_tmo_rx *rx, struct tetra_event *ev);
 bool tmo_addressed(const struct tetra_tmo_rx *rx, uint32_t ssi);

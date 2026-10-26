@@ -36,6 +36,7 @@ FILES=(
     src/l3/dmo_cc.c
     src/l3/sds.c
     src/l3/tmo_l3.c
+    src/l3/tmo_mle.c
     src/util/bits.c
     src/util/bits.h
     tests/unit/test_coding.cpp
@@ -43,6 +44,7 @@ FILES=(
     tests/unit/test_sds.cpp
     tests/unit/test_speech.cpp
     tests/unit/test_tmo.cpp
+    tests/unit/test_tmo_l3.cpp
     tools/dmo_scenario.c
     tools/dmo_scenario.h
     tools/tetra_demod.c

@@ -7,9 +7,11 @@ TETRA library focused on 32-bit MCUs.
 - **DMO** (EN 300 396): synchronisation, DMAC, call control, channel
   state, traffic, TPNI, short data including fragmented messages.
 - **TMO downlink** (EN 300 392-2, pi/4-DQPSK): synchronisation, SYSINFO,
-  AACH, MAC (association, fragmentation), LLC, MLE, CMCE calls, traffic,
+  AACH, MAC (association, fragmentation), LLC, MLE (neighbour cells,
+  network time), MM (registration, group attachment), CMCE calls, traffic,
   SDS and status. TMO uplink signals are recognised (not decoded).
-- SDS-TL / simple text decoding to UTF-8 (GSM 7-bit, ISO 8859-1, UCS-2).
+- SDS-TL / simple text decoding to UTF-8 (GSM 7-bit, ISO 8859-1, UCS-2)
+  and location system messages (NMEA).
 - Speech channel decoding (EN 300 395-2): traffic slots to 137-bit
   speech frames with bad frame indicator, ready for OpenACELP.
 - TX building blocks (channel encoding, burst assembly) for later use.
@@ -85,7 +87,7 @@ case TETRA_EV_CALL:
 
 ## Footprint
 
-About 19 KB of flash. RAM is the context: 5.4 KB (DMO) or 6.5 KB (TMO),
+About 22 KB of flash. RAM is the context: 5.4 KB (DMO) or 6.7 KB (TMO),
 sizes adjustable in `tetra_config.h`, plus 1.6 KB for the speech decoder
 workspace. Stack use stays below 1 KB plus the callback.
 

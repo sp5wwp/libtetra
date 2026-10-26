@@ -107,9 +107,22 @@ static void call_apply_mac(struct tetra_tmo_call_state *c,
     c->idle_frames = 0;
 }
 
-static void emit_call(struct tetra_tmo_rx *rx,
-                      const struct tetra_tmo_call_state *c,
-                      enum tetra_call_what what, uint8_t cause)
+/* Basic service information: circuit mode type and encryption flag. */
+static void call_apply_bsi(struct tetra_tmo_call_state *c, unsigned bsi)
+{
+    c->circuit_type = (uint8_t)(bsi >> 5);
+    c->encrypted = c->encrypted || ((bsi >> 4) & 1);
+}
+
+/* Events reported once per call (tetra_tmo_call_state.seen). */
+#define SEEN_SETUP 1
+#define SEEN_ALERT 2
+#define SEEN_PROCEEDING 4
+
+static void emit_call_st(struct tetra_tmo_rx *rx,
+                         const struct tetra_tmo_call_state *c,
+                         enum tetra_call_what what, uint8_t cause,
+                         uint8_t status)
 {
     struct tetra_event ev;
     struct tetra_call *k = &ev.u.call;
@@ -128,47 +141,19 @@ static void emit_call(struct tetra_tmo_rx *rx,
     k->priority = c->priority;
     k->circuit_type = c->circuit_type;
     k->cause = cause;
-    k->addressed = tmo_addressed(rx, c->dst_ssi);
+    k->status = status;
+    k->addressed = tmo_addressed(rx, c->dst_ssi) ||
+                   (rx->cfg.issi && c->talker_ssi == rx->cfg.issi);
     if (!k->addressed && !rx->cfg.promiscuous)
         return;
     tmo_emit(rx, &ev);
 }
 
-/* ---- Type 2 / type 3 element helpers (annex E) ---- */
-
-struct opt {
-    struct bitrd *b;
-    bool o;
-};
-
-static void opt_begin(struct opt *o, struct bitrd *b)
+static void emit_call(struct tetra_tmo_rx *rx,
+                      const struct tetra_tmo_call_state *c,
+                      enum tetra_call_what what, uint8_t cause)
 {
-    o->b = b;
-    o->o = br_left(b) ? br_get(b, 1) : false;
-}
-
-/* P-bit of the next type 2 element. */
-static bool opt_p(struct opt *o)
-{
-    if (!o->o || !br_left(o->b))
-        return false;
-    return br_get(o->b, 1);
-}
-
-/* Party address after a type identifier: 1 = SSI, 2 = SSI + extension. */
-static uint32_t party_addr(struct bitrd *b, unsigned type, uint32_t *ext)
-{
-    uint32_t ssi = 0;
-
-    if (type == 1 || type == 2)
-        ssi = br_get(b, 24);
-    if (type == 2) {
-        uint32_t e = br_get(b, 24);
-
-        if (ext)
-            *ext = e;
-    }
-    return ssi;
+    emit_call_st(rx, c, what, cause, TETRA_CALL_ST_NONE);
 }
 
 /* ---- CMCE PDUs ---- */
@@ -203,15 +188,16 @@ static void cmce_setup(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
     call_apply_mac(c, mi);
     c->dst_ssi = mi->ssi;
     c->group = comm != 0;
-    c->circuit_type = (uint8_t)(bsi >> 5);
-    c->encrypted = c->encrypted || ((bsi >> 4) & 1);
+    call_apply_bsi(c, bsi);
     c->priority = (uint8_t)prio;
     if (calling && (grant == 0 || grant == 3)) {
         c->talker_ssi = calling;
         c->tx_active = true;
     }
-    if (created)
+    if (created || !(c->seen & SEEN_SETUP)) {
+        c->seen |= SEEN_SETUP;
         emit_call(rx, c, TETRA_CALL_SETUP, 0);
+    }
 }
 
 static void cmce_connect(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
@@ -285,6 +271,174 @@ static void cmce_tx_ceased(struct tetra_tmo_rx *rx,
     c->tx_active = false;
 }
 
+/* D-ALERT and D-CALL PROCEEDING, tables 14.13 and 14.15. */
+static void cmce_alert(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
+                       struct bitrd *b, bool proceeding)
+{
+    struct tetra_tmo_call_state *c;
+    struct opt o;
+    bool created;
+    uint16_t id = (uint16_t)br_get(b, 14);
+    uint8_t status = TETRA_CALL_ST_NONE;
+    unsigned queued, bsi = 0x100;
+    uint8_t flag = proceeding ? SEEN_PROCEEDING : SEEN_ALERT;
+
+    br_skip(b, 3 + 1 + 1); /* time-out, hook or reserved, simplex */
+    queued = proceeding ? 0 : br_get(b, 1);
+    opt_begin(&o, b);
+    if (opt_p(&o))
+        bsi = br_get(b, 8);
+    if (proceeding && opt_p(&o))
+        status = (uint8_t)br_get(b, 3);
+    if (b->err)
+        return;
+    if (queued)
+        status = TETRA_CALL_ST_QUEUED;
+
+    /* Sent to the calling party, usually before the D-SETUP. */
+    c = call_get(rx, id, &created);
+    call_apply_mac(c, mi);
+    if (created)
+        c->talker_ssi = mi->ssi;
+    if (bsi < 0x100)
+        call_apply_bsi(c, bsi);
+    if ((c->seen & flag) && status == TETRA_CALL_ST_NONE)
+        return; /* repetition */
+    c->seen |= flag;
+    emit_call_st(rx, c, proceeding ? TETRA_CALL_PROCEEDING : TETRA_CALL_ALERT,
+                 0, status);
+}
+
+/* Optional new call identifier: the SwMI renumbers the call. */
+static void call_renumber(struct tetra_tmo_rx *rx,
+                          struct tetra_tmo_call_state *c, uint16_t id)
+{
+    struct tetra_tmo_call_state *old = call_find(rx, id);
+
+    if (old && old != c)
+        old->used = false;
+    c->call_id = id;
+}
+
+/* D-INFO, table 14.20. */
+static void cmce_info(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
+                      struct bitrd *b)
+{
+    struct tetra_tmo_call_state *c;
+    struct opt o;
+    uint16_t id = (uint16_t)br_get(b, 14);
+    uint32_t new_id = 0x10000;
+    uint8_t status = TETRA_CALL_ST_NONE;
+
+    br_skip(b, 1 + 1); /* reset time-out, poll request */
+    opt_begin(&o, b);
+    if (opt_p(&o))
+        new_id = br_get(b, 14);
+    if (opt_p(&o))
+        br_skip(b, 4); /* call time-out */
+    if (opt_p(&o))
+        br_skip(b, 3); /* call time-out, set-up phase */
+    if (opt_p(&o))
+        br_skip(b, 1); /* call ownership */
+    if (opt_p(&o))
+        br_skip(b, 9); /* modify */
+    if (opt_p(&o))
+        status = (uint8_t)br_get(b, 3);
+    c = call_find(rx, id);
+    if (!c || b->err)
+        return;
+    call_apply_mac(c, mi);
+    if (new_id < 0x10000)
+        call_renumber(rx, c, (uint16_t)new_id);
+    emit_call_st(rx, c, TETRA_CALL_INFO, 0, status);
+}
+
+/* D-TX WAIT (table 14.30) and D-TX CONTINUE (table 14.26). */
+static void cmce_tx_wait(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
+                         struct bitrd *b, bool cont)
+{
+    struct tetra_tmo_call_state *c;
+    uint16_t id = (uint16_t)br_get(b, 14);
+    unsigned go = cont ? br_get(b, 1) : 0;
+
+    c = call_find(rx, id);
+    if (!c || b->err)
+        return;
+    call_apply_mac(c, mi);
+    if (cont && go) {
+        if (c->tx_active)
+            return; /* repetition */
+        c->tx_active = true;
+        emit_call(rx, c, TETRA_CALL_TX_CONTINUE, 0);
+        return;
+    }
+    if (!c->tx_active)
+        return; /* repetition, or not continued after a wait */
+    emit_call(rx, c, cont ? TETRA_CALL_TX_CEASED : TETRA_CALL_TX_WAIT, 0);
+    c->tx_active = false;
+    if (cont)
+        c->talker_ssi = 0;
+}
+
+/* D-TX INTERRUPT, table 14.29: another party gets the floor. */
+static void cmce_tx_interrupt(struct tetra_tmo_rx *rx,
+                              const struct tmo_macinfo *mi, struct bitrd *b)
+{
+    struct tetra_tmo_call_state *c;
+    struct opt o;
+    uint16_t id = (uint16_t)br_get(b, 14);
+    unsigned grant = br_get(b, 2);
+    uint32_t talker = 0;
+
+    br_skip(b, 1 + 1 + 1);
+    opt_begin(&o, b);
+    if (opt_p(&o))
+        br_skip(b, 6); /* notification indicator */
+    if (opt_p(&o))
+        talker = party_addr(b, br_get(b, 2), NULL);
+    c = call_find(rx, id);
+    if (!c || b->err)
+        return;
+    call_apply_mac(c, mi);
+    if (grant != 0 && grant != 3)
+        return;
+    if (c->tx_active && talker && c->talker_ssi == talker)
+        return; /* repetition */
+    c->talker_ssi = talker;
+    c->tx_active = true;
+    emit_call(rx, c, TETRA_CALL_TX_INTERRUPT, 0);
+}
+
+/* D-CALL RESTORE, table 14.16. */
+static void cmce_restore(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
+                         struct bitrd *b)
+{
+    struct tetra_tmo_call_state *c;
+    struct opt o;
+    bool created;
+    uint16_t id = (uint16_t)br_get(b, 14);
+    uint32_t new_id = 0x10000;
+    uint8_t status = TETRA_CALL_ST_NONE;
+
+    br_skip(b, 2 + 1 + 1); /* grant, request permission, reset time-out */
+    opt_begin(&o, b);
+    if (opt_p(&o))
+        new_id = br_get(b, 14);
+    if (opt_p(&o))
+        br_skip(b, 4); /* call time-out */
+    if (opt_p(&o))
+        status = (uint8_t)br_get(b, 3);
+    if (b->err)
+        return;
+    c = call_get(rx, id, &created);
+    call_apply_mac(c, mi);
+    if (created)
+        c->dst_ssi = mi->ssi;
+    if (new_id < 0x10000)
+        call_renumber(rx, c, (uint16_t)new_id);
+    emit_call_st(rx, c, TETRA_CALL_RESTORE, 0, status);
+}
+
 static void cmce_release(struct tetra_tmo_rx *rx, struct bitrd *b)
 {
     struct tetra_tmo_call_state *c;
@@ -343,8 +497,11 @@ static void cmce_sds(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
     emit_sds(rx, &s);
 }
 
-static void cmce_pdu(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
-                     const uint8_t *buf, unsigned s, unsigned e)
+/* Kept out of line so its stack does not add to the MLE and MM paths. */
+static __attribute__((noinline)) void cmce_pdu(struct tetra_tmo_rx *rx,
+                                               const struct tmo_macinfo *mi,
+                                               const uint8_t *buf, unsigned s,
+                                               unsigned e)
 {
     struct bitrd b;
     unsigned type;
@@ -353,6 +510,27 @@ static void cmce_pdu(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
     type = br_get(&b, 5);
 
     switch (type) {
+    case D_ALERT:
+        cmce_alert(rx, mi, &b, false);
+        break;
+    case D_CALL_PROCEEDING:
+        cmce_alert(rx, mi, &b, true);
+        break;
+    case D_INFO:
+        cmce_info(rx, mi, &b);
+        break;
+    case D_TX_WAIT:
+        cmce_tx_wait(rx, mi, &b, false);
+        break;
+    case D_TX_CONTINUE:
+        cmce_tx_wait(rx, mi, &b, true);
+        break;
+    case D_TX_INTERRUPT:
+        cmce_tx_interrupt(rx, mi, &b);
+        break;
+    case D_CALL_RESTORE:
+        cmce_restore(rx, mi, &b);
+        break;
     case D_SETUP:
         cmce_setup(rx, mi, &b);
         break;
@@ -402,13 +580,25 @@ static void mle_pdu(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
         cmce_pdu(rx, mi, buf, b.pos, e);
         return;
     case TETRA_PROTO_MM:
-    case TETRA_PROTO_SNDCP:
+    case TETRA_PROTO_SNDCP: {
+        struct bitrd m = b;
+
+        if (pd == TETRA_PROTO_MM && tmo_mm(rx, mi, &m))
+            return;
         type = bit_at(buf, b.pos) << 3 | bit_at(buf, b.pos + 1) << 2 |
                bit_at(buf, b.pos + 2) << 1 | bit_at(buf, b.pos + 3);
         break;
+    }
     case TETRA_PROTO_MLE:
         type = bit_at(buf, b.pos) << 2 | bit_at(buf, b.pos + 1) << 1 |
                bit_at(buf, b.pos + 2);
+        if (type == MLE_D_NWRK_BROADCAST && br_left(&b) >= 3) {
+            struct bitrd m = b;
+
+            br_skip(&m, 3);
+            if (tmo_mle_nwrk(rx, &m))
+                return;
+        }
         break;
     default:
         break;
