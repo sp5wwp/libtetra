@@ -239,6 +239,28 @@ static unsigned li_bits(unsigned li)
 }
 
 #if TETRA_ENABLE_CRYPTO
+/* Address types whose 24-bit field is an encrypted short identity (ESI).
+ * USSI is the explicitly unencrypted form and is left as received. */
+static bool addr_is_esi(uint8_t addr_type)
+{
+    return addr_type == TMO_ADDR_SSI || addr_type == TMO_ADDR_SMI ||
+           addr_type == TMO_ADDR_SSI_EVENT || addr_type == TMO_ADDR_SMI_EVENT ||
+           addr_type == TMO_ADDR_SSI_UM;
+}
+
+/* Recover an encrypted MAC identity in place with TA61 and the cell CCK. */
+static void decrypt_identity(struct tetra_tmo_rx *rx, struct tmo_macinfo *mi)
+{
+    uint8_t cck[TETRA_TEA_KEY_BYTES];
+
+    if (!mi->ssi || !rx->cck_provider || !tmo_macinfo_encrypted(mi) ||
+        !addr_is_esi(mi->addr_type))
+        return;
+    if (rx->cck_provider(rx->cck_provider_user, &rx->cell, cck))
+        tetra_ta61_decrypt_ssi(cck, mi->ssi, &mi->ssi);
+    memset(cck, 0, sizeof(cck));
+}
+
 static void key_request_from_mac(const struct tmo_macinfo *mi,
                                  struct tetra_tmo_key_request *request)
 {
@@ -477,6 +499,11 @@ static unsigned mac_resource(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
         mi.usage_marker = (uint8_t)br_get(&b, 6);
         break;
     }
+#if TETRA_ENABLE_CRYPTO
+    /* Recover the identity before it is used for keying or reporting; the
+     * fragment paths inherit the cleartext value through f->addr. */
+    decrypt_identity(rx, &mi);
+#endif
     if (br_get(&b, 1))
         br_skip(&b, 4); /* power control */
     if (br_get(&b, 1))

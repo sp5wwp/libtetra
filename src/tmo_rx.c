@@ -77,6 +77,15 @@ void tetra_tmo_set_key_provider(struct tetra_tmo_rx *rx,
         memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
     }
 }
+
+void tetra_tmo_set_cck_provider(struct tetra_tmo_rx *rx,
+                                tetra_tmo_cck_provider provider, void *user)
+{
+    if (!rx)
+        return;
+    rx->cck_provider = provider;
+    rx->cck_provider_user = user;
+}
 #endif /* TETRA_ENABLE_CRYPTO */
 
 const struct tetra_cell *tetra_tmo_cell(const struct tetra_tmo_rx *rx)

@@ -103,8 +103,16 @@ if(TETRA_ENABLE_CRYPTO)
         src/crypto/tea2.c
         src/crypto/tea3.c
         src/crypto/tb5.c
+        src/crypto/ta61.c
+        src/crypto/hurdle.c
+        src/crypto/taa1.c
         src/tmo_crypto.c
     )
+    # Vendored osmo-tetra cipher (AGPL-3.0+); built without the strict
+    # warnings applied to libtetra's own sources.
+    set_source_files_properties(
+        src/crypto/hurdle.c src/crypto/taa1.c
+        PROPERTIES COMPILE_OPTIONS "-w")
 endif()
 
 target_include_directories(tetra

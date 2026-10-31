@@ -141,6 +141,20 @@ typedef bool (*tetra_tmo_key_provider)(
     enum tetra_tea_algorithm *algorithm,
     uint8_t ck[TETRA_TEA_KEY_BYTES]);
 
+/**
+ * Application-supplied common cipher key (CCK) selector for identity
+ * decryption (TA61). The receiver calls it, when an encrypted MAC identity
+ * is seen, to obtain the serving cell's 80-bit unsealed CCK; the cell
+ * (including cck_id) is provided for selection. Return false when no CCK is
+ * available, leaving the on-air identity unchanged. The key is copied and
+ * may be overwritten after return. This is separate from the traffic key
+ * provider: a network may encrypt identities with a CCK while traffic uses
+ * a different key.
+ */
+typedef bool (*tetra_tmo_cck_provider)(void *user,
+                                       const struct tetra_cell *cell,
+                                       uint8_t cck[TETRA_TEA_KEY_BYTES]);
+
 #endif /* TETRA_ENABLE_CRYPTO */
 
 /* 353 KSS bits cover the second-half-only TCH/S allocation. */
@@ -169,6 +183,8 @@ struct tetra_tmo_rx {
     uint8_t traffic_keystream[TETRA_TCH_KSS_BITS];
     tetra_tmo_key_provider key_provider;
     void *key_provider_user;
+    tetra_tmo_cck_provider cck_provider;
+    void *cck_provider_user;
 #endif
     struct tetra_tmo_frag frag[4];
     struct tetra_tmo_call_state calls[TETRA_TMO_MAX_CALLS];
@@ -198,6 +214,16 @@ void tetra_tmo_init(struct tetra_tmo_rx *rx, const struct tetra_rx_config *cfg);
 #if TETRA_ENABLE_CRYPTO
 void tetra_tmo_set_key_provider(struct tetra_tmo_rx *rx,
                                 tetra_tmo_key_provider provider, void *user);
+
+/**
+ * Configure the callback used to select the common cipher key (CCK) for
+ * TMO identity decryption (TA61). Pass NULL to leave encrypted identities
+ * unchanged. May be changed from an event callback; the change applies to
+ * subsequently processed blocks. Available only when TETRA_ENABLE_CRYPTO is
+ * enabled at build time.
+ */
+void tetra_tmo_set_cck_provider(struct tetra_tmo_rx *rx,
+                                tetra_tmo_cck_provider provider, void *user);
 #endif
 
 /**

@@ -33,6 +33,24 @@ bool tetra_tb5(uint16_t cn, uint16_t la, uint8_t cc,
                const uint8_t ck[TETRA_TEA_KEY_BYTES],
                uint8_t eck[TETRA_TEA_KEY_BYTES]);
 
+/**
+ * Recover a cleartext short subscriber identity (SSI) from the encrypted
+ * short identity (ESI) carried on air, using TA61 and the cell's common
+ * cipher key (CCK). This is the identity-protection mechanism of
+ * EN 300 392-7; it is independent of the TEA traffic/signalling cipher.
+ *
+ * The underlying TA61/Hurdle primitive is the Osmocom osmo-tetra
+ * implementation (src/crypto/taa1.c, src/crypto/hurdle.c), vendored
+ * unchanged under its own AGPL-3.0-or-later terms.
+ *
+ * @param cck 80-bit unsealed CCK for the serving cell, network byte order.
+ * @param esi 24-bit encrypted short identity as received on air.
+ * @param ssi receives the 24-bit cleartext SSI.
+ * @return true on success; false for invalid pointers.
+ */
+bool tetra_ta61_decrypt_ssi(const uint8_t cck[TETRA_TEA_KEY_BYTES],
+                            uint32_t esi, uint32_t *ssi);
+
 /** TETRA air-interface keystream generators. */
 enum tetra_tea_algorithm {
     TETRA_TEA1 = 1,

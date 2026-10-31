@@ -111,3 +111,27 @@ TEST_CASE("TEA API rejects invalid parameters", "[crypto][tea]")
     REQUIRE_FALSE(tetra_tea_build_iv(&time, 0,
                                      static_cast<tetra_tea_direction>(2), &iv));
 }
+
+TEST_CASE("TA61 recovers the SSI from the encrypted short identity",
+          "[crypto][ta61][oracle]")
+{
+    /* Oracle vector produced with osmo-tetra's ta61(): CCK below encrypts
+     * SSI 0x0a1b2c to ESI 0xc40a49. */
+    const uint8_t cck[TETRA_TEA_KEY_BYTES] = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+    };
+    uint32_t ssi = 0;
+
+    REQUIRE(tetra_ta61_decrypt_ssi(cck, 0xc40a49u, &ssi));
+    REQUIRE(ssi == 0x0a1b2cu);
+
+    /* A different CCK does not recover the same identity. */
+    uint8_t other[TETRA_TEA_KEY_BYTES];
+    for (unsigned i = 0; i < TETRA_TEA_KEY_BYTES; i++)
+        other[i] = (uint8_t)(cck[i] ^ 1u);
+    REQUIRE(tetra_ta61_decrypt_ssi(other, 0xc40a49u, &ssi));
+    REQUIRE(ssi != 0x0a1b2cu);
+
+    REQUIRE_FALSE(tetra_ta61_decrypt_ssi(cck, 0xc40a49u, nullptr));
+    REQUIRE_FALSE(tetra_ta61_decrypt_ssi(nullptr, 0xc40a49u, &ssi));
+}

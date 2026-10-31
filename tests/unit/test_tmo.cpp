@@ -1114,4 +1114,78 @@ TEST_CASE("TMO receiver decrypts MAC signalling and supplies traffic KSS",
         REQUIRE(c.traffic_keystream[i] == expected);
     }
 }
+
+namespace
+{
+/* Oracle CCK: encrypts SSI 0x0a1b2c to ESI 0xc40a49 (osmo-tetra ta61()). */
+bool provide_test_cck(void *user, const struct tetra_cell *cell,
+                      uint8_t cck[TETRA_TEA_KEY_BYTES])
+{
+    static const uint8_t key[TETRA_TEA_KEY_BYTES] = {
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
+    };
+    (void)cell;
+    if (user)
+        *static_cast<unsigned *>(user) += 1;
+    std::memcpy(cck, key, TETRA_TEA_KEY_BYTES);
+    return true;
+}
+
+/* Encrypted MAC-RESOURCE (SSI address = esi) with an unhandled LLC PDU
+ * payload, so the receiver reports it with the identity it resolved. */
+void build_esi_block(uint8_t blk[34], uint32_t esi)
+{
+    unsigned pos = 0;
+
+    std::memset(blk, 0, 34);
+    bw_put(blk, &pos, 0, 2); /* MAC-RESOURCE */
+    bw_put(blk, &pos, 0, 1); /* no fill bits */
+    bw_put(blk, &pos, 0, 1); /* no grant position */
+    bw_put(blk, &pos, 2, 2); /* encrypted, even key identifier */
+    bw_put(blk, &pos, 0, 1); /* no random access */
+    bw_put(blk, &pos, 7, 6); /* seven octets */
+    bw_put(blk, &pos, 1, 3); /* SSI address */
+    bw_put(blk, &pos, esi, 24);
+    bw_put(blk, &pos, 0, 1); /* no power control */
+    bw_put(blk, &pos, 0, 1); /* no basic slot grant */
+    bw_put(blk, &pos, 0, 1); /* no channel allocation */
+    bw_put(blk, &pos, 8, 4); /* unhandled LLC PDU type (left encrypted) */
+    bw_put(blk, &pos, 0x12d, 9);
+}
+} // namespace
+
+TEST_CASE("TMO receiver decrypts the MAC identity with TA61",
+          "[tmo][crypto][ta61]")
+{
+    const uint32_t esi = 0xc40a49, ssi = 0x0a1b2c;
+    uint8_t blk[34];
+
+    build_esi_block(blk, esi);
+
+    SECTION("CCK provider resolves the cleartext identity")
+    {
+        capture c;
+        unsigned cck_calls = 0;
+
+        init(c);
+        tetra_tmo_set_cck_provider(&c.rx, provide_test_cck, &cck_calls);
+        tmo_mac_block(&c.rx, TMO_SCH_F, blk, 56, 0);
+
+        REQUIRE(cck_calls == 1);
+        REQUIRE(c.pdus.size() == 1);
+        REQUIRE(c.pdus[0].proto == TETRA_PROTO_LLC);
+        REQUIRE(c.pdus[0].encrypted); /* no key provider: payload opaque */
+        REQUIRE(c.pdus[0].addr == ssi);
+    }
+
+    SECTION("without a CCK provider the on-air identity is reported")
+    {
+        capture c;
+
+        init(c);
+        tmo_mac_block(&c.rx, TMO_SCH_F, blk, 56, 0);
+        REQUIRE(c.pdus.size() == 1);
+        REQUIRE(c.pdus[0].addr == esi);
+    }
+}
 #endif
