@@ -10,7 +10,7 @@
 
 /** Enable TEA1/TEA2/TEA3 and TMO air-interface decryption. */
 #ifndef TETRA_ENABLE_CRYPTO
-#define TETRA_ENABLE_CRYPTO 1
+#define TETRA_ENABLE_CRYPTO 0
 #endif
 
 /** Largest reassembled TMO TM-SDU in bits (N.202 is 2632). */

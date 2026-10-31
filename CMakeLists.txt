@@ -12,7 +12,7 @@ endif()
 
 option(TETRA_BUILD_TOOLS "Build host tools" ${TETRA_HOST_DEFAULT})
 option(TETRA_BUILD_TESTS "Build unit tests (Catch2)" ${TETRA_HOST_DEFAULT})
-option(TETRA_ENABLE_CRYPTO "Build TEA/TB5 and TMO decryption support" ON)
+option(TETRA_ENABLE_CRYPTO "Build TEA/TB5 and TMO decryption support" OFF)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)

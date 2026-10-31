@@ -122,6 +122,40 @@ TEST_CASE("Speech frames of a stolen slot", "[speech]")
     REQUIRE(sp.bfi[1]);
 }
 
+TEST_CASE("Stolen-half speech uses the second-half KSS offset",
+          "[speech][encryption]")
+{
+    bits_t b = random_bits(137, 0x216);
+    int8_t slot[432];
+    uint8_t t4[216];
+    uint8_t keystream[353] = {};
+    struct tetra_traffic t{};
+    struct tetra_speech sp;
+
+    tetra_speech_encode_half(b.data(), t4);
+    std::memset(slot, 0, sizeof(slot));
+    for (unsigned i = 0; i < 216; i++)
+        slot[216 + i] = t4[i] ? 64 : -64;
+
+    /*
+     * The second-half-only TCH/S allocation starts at KSS bit 216.
+     * Poison the earlier KSS region: a decoder that starts at bit 137
+     * (the second frame's offset in a full slot) will corrupt the frame.
+     */
+    for (unsigned i = 0; i < 216; i++)
+        keystream[i] = 1;
+
+    t.half[0] = TETRA_HALF_STOLEN_C;
+    t.half[1] = TETRA_HALF_TCH;
+    t.bits = slot;
+    t.cipher_keystream = keystream;
+
+    REQUIRE(tetra_speech_decode(&ws, &t, &sp) == 1);
+    REQUIRE(sp.bfi[0]);
+    REQUIRE_FALSE(sp.bfi[1]);
+    REQUIRE(std::memcmp(sp.bits[1], b.data(), 137) == 0);
+}
+
 TEST_CASE("Speech decoding of real TMO traffic passes the CRC",
           "[speech][oracle]")
 {

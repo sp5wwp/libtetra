@@ -174,8 +174,12 @@ cmake -B build
 cmake --build build
 ctest --test-dir build
 
-# Disable TEA1/2/3, TB5 and TMO air-interface decryption to save flash:
-cmake -B build-no-crypto -DTETRA_ENABLE_CRYPTO=OFF -DTETRA_BUILD_TESTS=OFF
+# Crypto is disabled by default. Enable TEA1/2/3, TB5 and TMO decryption:
+cmake -B build-crypto -DTETRA_ENABLE_CRYPTO=ON
+cmake --build build-crypto
+
+# Explicitly disable crypto in an existing build directory:
+cmake -B build-no-crypto -DTETRA_ENABLE_CRYPTO=OFF
 cmake --build build-no-crypto
 
 cmake -B build_m4 -DCMAKE_TOOLCHAIN_FILE=cmake/arm-cortex-m4.cmake  # or m33
