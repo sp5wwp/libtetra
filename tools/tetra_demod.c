@@ -9,6 +9,11 @@
  * Pipeline: frequency shift -> RRC matched filter evaluated at arbitrary
  * time instants -> Gardner timing recovery -> differential detection with
  * residual-rotation tracking -> soft or hard bits.
+ *
+ * Bursts (TMO uplink, DMO) start after gaps in which the loops drift: a
+ * jump in power just ahead of the sampling point marks a burst start, and
+ * the timing phase and rotation are then estimated from its first symbols
+ * before they are output.
  */
 
 #include <complex.h>
@@ -24,6 +29,12 @@
 #define RRC_ALPHA 0.35
 #define RRC_SPAN 4  /* symbols on each side */
 #define RRC_RES 256 /* table points per symbol */
+
+#define ACQ_LEAD 8    /* symbols of look-ahead for burst starts */
+#define ACQ_LEN 48    /* symbols used to acquire a burst */
+#define ACQ_PHASES 16 /* timing phases tried per symbol */
+#define ACQ_JUMP 10.0 /* power rise marking a burst start (10 dB) */
+#define ACQ_HOLD 128  /* symbols before another burst start */
 
 enum in_fmt { FMT_WAV, FMT_CS16, FMT_CF32, FMT_CU8 };
 enum out_fmt { OUT_DIBIT, OUT_BIT, OUT_SOFT };
@@ -66,6 +77,9 @@ struct demod {
     float complex prev_sym;
     double rot; /* residual rotation per symbol (rad) */
     double pwr_fast, pwr_slow, pwr_peak;
+    double ahead_fast, ahead_slow; /* power ACQ_LEAD symbols ahead */
+    long acq_hold;
+    long nacq;
     double gain_ted, gain_rot;
     int have_prev;
     enum out_fmt out;
@@ -121,13 +135,69 @@ static void emit(struct demod *d, float complex w)
     d->nsym++;
 }
 
+/*
+ * Burst start: timing phase and rotation from the 4th power of the
+ * differential symbols over the first ACQ_LEN symbols.
+ */
+static void acquire(struct demod *d)
+{
+    double t0 = d->t_next + (ACQ_LEAD - 3) * d->sps;
+    double best = -1, best_ph = 0, best_pwr = 0;
+    float complex best_sum = 0;
+
+    for (int i = 0; i < ACQ_PHASES; i++) {
+        double ph = (i - ACQ_PHASES / 2) * d->sps / ACQ_PHASES;
+        float complex prev = mf_at(d, t0 + ph), sum = 0;
+        double pwr = 0;
+
+        for (int k = 1; k <= ACQ_LEN; k++) {
+            float complex y = mf_at(d, t0 + ph + k * d->sps);
+            float complex z = y * conjf(prev);
+            float m = cabsf(z) + 1e-12f;
+
+            z /= m;
+            sum += z * z * z * z;
+            pwr += crealf(y * conjf(y));
+            prev = y;
+        }
+        if (cabsf(sum) > best) {
+            best = cabsf(sum);
+            best_ph = ph;
+            best_sum = sum;
+            best_pwr = pwr / ACQ_LEN;
+        }
+    }
+    d->t_next += best_ph;
+    d->rot = cargf(-best_sum) / 4.0;
+    /* The timing error is normalised by pwr_slow: start from the burst's
+     * level, not from the noise before it. */
+    d->pwr_fast = d->pwr_slow = best_pwr;
+    if (best_pwr > d->pwr_peak)
+        d->pwr_peak = best_pwr;
+    d->acq_hold = ACQ_HOLD;
+    d->nacq++;
+}
+
 /* Produce all symbols whose filter support is inside the buffer. */
 static void run(struct demod *d, int flush)
 {
     double margin = RRC_SPAN * d->sps + 2;
+    double look = (ACQ_LEAD + ACQ_LEN + 2) * d->sps + margin;
     double end = (double)(d->buf_base + (long)d->buf_len);
 
-    while (d->t_next + margin < end || (flush && d->t_next < end)) {
+    while (d->t_next + look < end || (flush && d->t_next < end)) {
+        float complex ya = mf_at(d, d->t_next + ACQ_LEAD * d->sps);
+        double pa = crealf(ya * conjf(ya));
+
+        if (d->nsym == 0 && d->ahead_slow == 0)
+            d->ahead_slow = d->ahead_fast = pa;
+        d->ahead_fast = 0.75 * d->ahead_fast + 0.25 * pa;
+        if (d->acq_hold > 0)
+            d->acq_hold--;
+        else if (!flush && d->ahead_fast > ACQ_JUMP * d->ahead_slow)
+            acquire(d);
+        d->ahead_slow = (1 - 1.0 / 256) * d->ahead_slow + pa / 256;
+
         float complex y = mf_at(d, d->t_next);
         float complex ym = mf_at(d, d->t_next - d->sps / 2);
         double p = crealf(y * conjf(y));
@@ -343,8 +413,8 @@ int main(int argc, char **argv)
     run(&d, 1);
 
     if (!quiet)
-        fprintf(stderr, "%ld symbols, residual offset %.1f Hz\n", d.nsym,
-                d.rot / (2 * M_PI) * SYMRATE);
+        fprintf(stderr, "%ld symbols, %ld bursts, residual offset %.1f Hz\n",
+                d.nsym, d.nacq, d.rot / (2 * M_PI) * SYMRATE);
     fclose(fi);
     fclose(d.fo);
     free(d.buf);

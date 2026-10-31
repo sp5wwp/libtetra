@@ -225,7 +225,8 @@ builds export `tetra::tetra` via `find_package(libtetra CONFIG)`.
 
 ## Tools
 
-- `tetra_demod`: I/Q recording to bits (`-f` carrier offset in Hz).
+- `tetra_demod`: I/Q recording to bits (`-f` carrier offset in Hz). It
+  re-acquires at each burst, so TMO uplink and DMO recordings work too.
 - `tetra_rx`: prints decoded events, optionally writes speech frames.
 - `tetra_gen`: synthetic DMO signal (bits or I/Q).
 
