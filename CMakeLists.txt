@@ -109,10 +109,13 @@ if(TETRA_ENABLE_CRYPTO)
         src/tmo_crypto.c
     )
     # Vendored osmo-tetra cipher (AGPL-3.0+); built without the strict
-    # warnings applied to libtetra's own sources.
+    # warnings applied to libtetra's own sources. -fno-strict-aliasing is
+    # required: these files read and write the same buffers through both
+    # uint8_t and uint32_t lvalues, which is undefined under the default
+    # type-based aliasing rules and can be miscompiled at -O2.
     set_source_files_properties(
         src/crypto/hurdle.c src/crypto/taa1.c
-        PROPERTIES COMPILE_OPTIONS "-w")
+        PROPERTIES COMPILE_OPTIONS "-w;-fno-strict-aliasing")
 endif()
 
 target_include_directories(tetra

@@ -136,9 +136,29 @@ building with crypto enabled:
 cp osmo-tetra/src/crypto/{taa1.c,taa1.h,hurdle.c,hurdle.h} src/crypto/
 ```
 
-`hurdle.c` uses word-sized casts over byte buffers and a compile-time
-`__BYTE_ORDER` switch; on a target where unaligned access or strict aliasing
-matters, review it before use on that platform.
+`hurdle.c` reads and writes its 8-byte cipher state with word-sized casts
+over `uint8_t` buffers. This needs care on ARMv7-M / ARMv8-M (Cortex-M3/M4/
+M33):
+
+- **Strict aliasing.** The same buffers are accessed as both `uint8_t` and
+  `uint32_t`, which is undefined behaviour and can be miscompiled at `-O2`.
+  The CMake build compiles the vendored files with `-fno-strict-aliasing`;
+  reproduce that flag in any other build system.
+- **Alignment.** At `-O2` the two adjacent word casts in `HURDLE_encrypt`
+  compile to `LDRD`/`STRD`, which fault on an unaligned address on Cortex-M
+  regardless of `CCR.UNALIGN_TRP` (unlike a single `LDR`). The state buffers
+  are `uint8_t[]` locals, so a HardFault depends on stack placement and can
+  appear with a compiler change. For a dependable MCU build, replace the
+  four `*(uint32_t *)` accesses of `abInput`/`abOutput` in `HURDLE_encrypt`
+  with `memcpy` (the compiler lowers it to safe byte accesses), or make
+  those buffers word-aligned. Cortex-A (e.g. A55) and other AArch64/x86
+  targets tolerate the unaligned access and are unaffected.
+
+The compile-time `__BYTE_ORDER`/`__LITTLE_ENDIAN` switch in these files also
+resolves to the little-endian path only by accident when those macros are
+undefined (as on bare-metal toolchains): both sides evaluate to 0. That is
+correct for little-endian Cortex targets but is worth pinning explicitly if
+you build for anything else.
 
 ## Usage
 

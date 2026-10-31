@@ -24,6 +24,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "hurdle.h"
 
@@ -157,8 +158,8 @@ void HURDLE_encrypt(uint8_t abOutput[8], const uint8_t abInput[8], struct hurdle
 	uint8_t *lpRoundKey = (eEncryptMode == HURDLE_DECRYPT) ? &lpKey->abRoundKeys[240] : lpKey->abRoundKeys;
 
 	/* copy state */
-	dwLhs = *(uint32_t *)&abInput[0];
-	dwRhs = *(uint32_t *)&abInput[4];
+	memcpy(&dwLhs, &abInput[0], 4);
+	memcpy(&dwRhs, &abInput[4], 4);
 
 	for (i = 0; i < 16; i++) {
 		/* Round function */
@@ -173,8 +174,8 @@ void HURDLE_encrypt(uint8_t abOutput[8], const uint8_t abInput[8], struct hurdle
 		lpRoundKey += (eEncryptMode == HURDLE_DECRYPT) ? -16 : 16;
 	}
 
-	*(uint32_t *)&abOutput[0] = dwRhs;
-	*(uint32_t *)&abOutput[4] = dwLhs;
+	memcpy(&abOutput[0], &dwRhs, 4);
+	memcpy(&abOutput[4], &dwLhs, 4);
 }
 
 void HURDLE_enc_cbc(uint8_t abCiphertext[16], const uint8_t abPlaintext[16], uint8_t abKey[16])
