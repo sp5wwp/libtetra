@@ -19,6 +19,10 @@ endif()
 
 add_library(tetra STATIC
     src/common.c
+    src/crypto/tea.c
+    src/crypto/tea1.c
+    src/crypto/tea2.c
+    src/crypto/tea3.c
     src/dmo_rx.c
     src/l1/burst.c
     src/l1/l1.c
@@ -84,7 +88,7 @@ if(TETRA_BUILD_TESTS)
     enable_testing()
     find_package(Catch2 3 REQUIRED)
 
-    set(TETRA_TESTS coding dmo sds speech tmo tmo_l3)
+    set(TETRA_TESTS coding crypto dmo sds speech tmo tmo_l3)
     foreach(t ${TETRA_TESTS})
         add_executable(test_${t} tests/unit/test_${t}.cpp)
         set_target_properties(test_${t} PROPERTIES CXX_STANDARD 14

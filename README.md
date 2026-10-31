@@ -16,9 +16,41 @@ TETRA library focused on 32-bit MCUs.
 - Speech channel decoding (EN 300 395-2): traffic slots to 137-bit
   speech frames with bad frame indicator, ready for OpenACELP.
 - TX building blocks (channel encoding, burst assembly) for later use.
+- TEA1/TEA2/TEA3 byte-oriented keystream generation and TMO IV construction.
 
-Not supported: air interface encryption, TMO uplink, D8PSK/QAM,
-DM-REP/DM-GATE operation. Circuit mode data is delivered undecoded.
+The TEA APIs expose keystream generation only; the receiver does not yet
+manage keys, derive ECK with TB5, or automatically decrypt received PDUs.
+Also not supported: TMO uplink, D8PSK/QAM, DM-REP/DM-GATE operation.
+Circuit mode data is delivered undecoded.
+
+## TEA keystream generation
+
+The `tetra_crypto.h` API generates TEA1, TEA2, or TEA3 keystream bytes from
+an 80-bit ECK and a 29-bit IV. `tetra_tea_build_iv()` assembles the TMO IV
+from the slot, frame, multiframe, hyperframe extension, and link direction.
+The caller remains responsible for key management and any required TB5 key
+derivation; consume generated bits most-significant-bit first.
+
+```c
+#include <tetra/tetra.h>
+
+struct tetra_time time = { .tn = 1, .fn = 1, .mn = 1 };
+uint8_t eck[TETRA_TEA_KEY_BYTES] = { 0 }; /* replace with the active ECK */
+uint8_t keystream[54];
+uint32_t iv;
+
+if (tetra_tea_build_iv(&time, hyperframe, TETRA_TEA_DOWNLINK, &iv) &&
+    tetra_tea_generate(TETRA_TEA1, iv, eck, sizeof(keystream), keystream)) {
+    /* Use keystream bytes, MSB first, to encrypt/decrypt the MAC fields. */
+}
+```
+
+The TEA1/2/3 source files are adapted from Osmocom `osmo-tetra` and retain
+their original AGPL-3.0-or-later licensing and copyright attribution. The
+AGPL text is included as `LICENSE-AGPL-3.0`; other libtetra files retain their
+GPL-3.0-or-later licensing. ETSI EN 300 392-7 states that the TETRA standard
+algorithms are available on a restricted basis; users must comply with the
+applicable ETSI TS 101 053 terms and undertakings.
 
 ## Usage
 

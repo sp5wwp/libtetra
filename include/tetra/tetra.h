@@ -10,6 +10,7 @@
 #define TETRA_VERSION_PATCH 0
 
 #include <tetra/tetra_common.h>
+#include <tetra/tetra_crypto.h>
 #include <tetra/tetra_dmo.h>
 #include <tetra/tetra_sds.h>
 #include <tetra/tetra_speech.h>
