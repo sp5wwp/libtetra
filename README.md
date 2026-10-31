@@ -9,7 +9,12 @@ TETRA library focused on 32-bit MCUs.
 - **TMO downlink** (EN 300 392-2, pi/4-DQPSK): synchronisation, SYSINFO,
   AACH, MAC (association, fragmentation), LLC, MLE (neighbour cells,
   network time), MM (registration, group attachment), CMCE calls, traffic,
-  SDS and status. TMO uplink signals are recognised (not decoded).
+  SDS and status. Calls on other carriers can be followed through a
+  retune callback.
+- **TMO uplink**: control and normal uplink bursts (SCH/HU, SCH/F, STCH),
+  MAC (random access, fragmentation), U-SETUP, U-TX DEMAND and other call
+  control, SDS and status, traffic. Uplink encryption is reported, not
+  decrypted.
 - SDS-TL / simple text decoding to UTF-8 (GSM 7-bit, ISO 8859-1, UCS-2),
   LIP location reports (TS 100 392-18-1) and location system messages
   (NMEA).
@@ -20,8 +25,8 @@ TETRA library focused on 32-bit MCUs.
 
 The TEA API exposes keystream generation, TB5 derivation and a TMO receiver
 key-provider interface. TMO signalling and speech can be decrypted when the
-application provides the correct provisioned key. Also not supported: TMO
-uplink, D8PSK/QAM, DM-REP/DM-GATE operation.
+application provides the correct provisioned key. Also not supported:
+D8PSK/QAM, DM-GATE operation, transmitting through a DM-REP.
 Circuit mode data is delivered undecoded.
 
 ## TEA keystream generation
@@ -162,13 +167,34 @@ case TETRA_EV_CALL:
     break;
 ```
 
+To follow calls allocated to other carriers of the cell, give a retune
+callback. It is asked to tune to the call's carrier and back to the main
+carrier when the call ends; return false to stay where you are:
+
+```c
+static bool on_retune(void *user, const struct tetra_retune *r)
+{
+    if (r->reason == TETRA_RETUNE_CALL && !r->addressed)
+        return false;               /* only follow our own calls */
+    return radio_set_rx_hz(r->freq_hz) == 0;
+}
+
+cfg.retune = on_retune;
+```
+
+To listen to the uplink of a cell, synchronise to its downlink first (or
+call `tetra_tmo_set_uplink_cell()`), then tune to `cell->ul_freq_hz` and
+call `tetra_tmo_resync()`. Uplink events have `ev->uplink` set; the sending
+MS is in `src_ssi`.
+
 ## Footprint
 
 About 24 KB of flash. RAM is the context: 5.4 KB (DMO) or 6.7 KB (TMO),
 plus 1.6 KB for the speech decoder workspace. Receiver sizing is configured
 with the CMake cache options `TETRA_TMO_MAX_SDU_BITS`,
 `TETRA_DMO_MAX_SDU_BITS`, and `TETRA_TMO_MAX_CALLS`. Stack use stays below
-1 KB plus the callback.
+1 KB plus the callback. `-DTETRA_UPLINK_DECODE=OFF` leaves out the uplink
+decoder.
 
 ## Build and test
 
@@ -206,6 +232,7 @@ builds export `tetra::tetra` via `find_package(libtetra CONFIG)`.
 ```bash
 build/tetra_demod -f -20000 -o soft capture.wav capture.soft
 build/tetra_rx -m tmo -t soft -q -s speech.ser capture.soft
+build/tetra_rx -m tmo -t soft -u 235:78:1 uplink.soft   # MCC:MNC:CC
 oa_decode speech.ser speech.raw    # OpenACELP: 8 kHz 16-bit PCM
 ```
 

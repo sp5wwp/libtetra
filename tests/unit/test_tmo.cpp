@@ -48,12 +48,25 @@ struct capture {
     std::vector<uint8_t> traffic_keystream;
     bool traffic_encrypted = false;
     unsigned uplinks = 0;
+    std::vector<struct tetra_retune> retunes;
+    bool accept_retune = true;
+    unsigned uplink_flagged = 0;
 };
+
+bool on_retune(void *user, const struct tetra_retune *r)
+{
+    capture *c = static_cast<capture *>(user);
+
+    c->retunes.push_back(*r);
+    return c->accept_retune;
+}
 
 void on_event(void *user, const struct tetra_event *ev)
 {
     capture *c = static_cast<capture *>(user);
 
+    if (ev->uplink)
+        c->uplink_flagged++;
     switch (ev->type) {
     case TETRA_EV_SYNC:
         if (ev->u.sync.locked)
@@ -491,6 +504,174 @@ TEST_CASE("TMO receiver handles SYSINFO, association, fragmentation and SDS",
     REQUIRE(c.texts.size() == 2);
     REQUIRE(c.texts[0] == "HI");
     REQUIRE(c.texts[1] == long_text);
+}
+
+/* ---- Carrier following ---- */
+
+namespace
+{
+
+/* D-SETUP to a group with a channel allocation on another carrier. */
+void add_setup_ca(pdu &blk, uint32_t gssi, uint16_t id, uint16_t carrier,
+                  unsigned ts)
+{
+    pdu sdu;
+    unsigned start = blk.n, len, li;
+
+    sdu.put(2, 4);
+    sdu.put(2, 3);
+    sdu.put(7, 5); /* D-SETUP */
+    sdu.put(id, 14);
+    sdu.put(0, 4 + 1 + 1);
+    sdu.put(1 << 2, 8); /* speech, group */
+    sdu.put(0, 2 + 1);  /* granted */
+    sdu.put(0, 4);
+    sdu.put(0, 1); /* O-bit */
+
+    len = 43 + 25 + sdu.n;
+    li = (len + 7) / 8;
+    blk.put(0, 2);
+    blk.put(li * 8 != len, 1);
+    blk.put(0, 1 + 2 + 1);
+    blk.put(li, 6);
+    blk.put(1, 3);
+    blk.put(gssi, 24);
+    blk.put(0, 2);
+    blk.put(1, 1); /* channel allocation */
+    blk.put(0, 2); /* replace */
+    blk.put(ts, 4);
+    blk.put(3, 2); /* uplink and downlink */
+    blk.put(0, 2);
+    blk.put(carrier, 12);
+    blk.put(0, 1); /* no extended carrier numbering */
+    blk.put(1, 2); /* monitoring pattern */
+    put_bits(blk, sdu, 0, sdu.n);
+    fill_to(blk, start + li * 8);
+}
+
+/* End the block with a null PDU, as a base station does. */
+std::vector<uint8_t> finish_null(pdu &blk)
+{
+    if (blk.n + 16 <= 268) {
+        blk.put(0, 2); /* MAC-RESOURCE */
+        blk.put(0, 1 + 4);
+        blk.put(2, 6); /* 2 octets */
+        blk.put(0, 3); /* null address */
+    }
+    return finish(blk);
+}
+
+pdu cmce_release(uint16_t id)
+{
+    pdu p;
+
+    p.put(2, 4);
+    p.put(2, 3);
+    p.put(6, 5); /* D-RELEASE */
+    p.put(id, 14);
+    p.put(1, 5);
+    p.put(0, 1);
+    return p;
+}
+
+void init_retune(capture &c, bool accept)
+{
+    struct tetra_rx_config cfg;
+
+    std::memset(&cfg, 0, sizeof(cfg));
+    cfg.cb = on_event;
+    cfg.user = &c;
+    cfg.promiscuous = true;
+    cfg.retune = on_retune;
+    c.retunes.clear();
+    c.accept_retune = accept;
+    tetra_tmo_init(&c.rx, &cfg);
+}
+
+std::vector<uint8_t> call_on_carrier(bool release)
+{
+    tmo_gen g;
+    pdu a, b;
+
+    add_setup_ca(a, 5000, 321, 3705, 0x4); /* TN2 (MSB is TN1) */
+    g.schf.push_back(finish_null(a));
+    if (release) {
+        add_resource(b, 5000, cmce_release(321));
+        g.schf.push_back(finish_null(b));
+    }
+    for (unsigned i = 0; i < 4 * 18 * 2; i++)
+        gen_slot(g);
+    return g.bits;
+}
+
+} // namespace
+
+TEST_CASE("TMO receiver follows a call to its carrier and back",
+          "[tmo][retune]")
+{
+    static capture c;
+    std::vector<uint8_t> bits = call_on_carrier(true);
+
+    init_retune(c, true);
+    tetra_tmo_push_bits(&c.rx, bits.data(), bits.size());
+
+    REQUIRE(c.locks == 1);
+    REQUIRE(c.cell.ul_freq_hz == 382512500u);
+    REQUIRE(c.retunes.size() == 2);
+    REQUIRE(c.retunes[0].reason == TETRA_RETUNE_CALL);
+    REQUIRE(c.retunes[0].carrier == 3705);
+    REQUIRE(c.retunes[0].freq_hz == 392637500u);
+    REQUIRE(c.retunes[0].ul_freq_hz == 382637500u);
+    REQUIRE(c.retunes[0].call_id == 321);
+    REQUIRE(c.retunes[0].dst_ssi == 5000);
+    REQUIRE(c.retunes[0].timeslots == TETRA_TS2);
+    REQUIRE(c.retunes[1].reason == TETRA_RETUNE_MAIN);
+    REQUIRE(c.retunes[1].carrier == 3700);
+    REQUIRE(c.retunes[1].freq_hz == 392512500u);
+    REQUIRE(c.uplink_flagged == 0);
+}
+
+TEST_CASE("TMO receiver stays when a retune is declined", "[tmo][retune]")
+{
+    static capture c;
+    std::vector<uint8_t> bits = call_on_carrier(true);
+
+    init_retune(c, false);
+    tetra_tmo_push_bits(&c.rx, bits.data(), bits.size());
+
+    REQUIRE(c.retunes.size() == 1);
+    REQUIRE(c.retunes[0].reason == TETRA_RETUNE_CALL);
+}
+
+TEST_CASE("TMO receiver returns to the main carrier after losing lock",
+          "[tmo][retune]")
+{
+    static capture c;
+    std::vector<uint8_t> bits = call_on_carrier(false);
+
+    /* The carrier disappears */
+    bits.insert(bits.end(), 200 * 510, 0);
+    init_retune(c, true);
+    tetra_tmo_push_bits(&c.rx, bits.data(), bits.size());
+
+    REQUIRE(!tetra_tmo_locked(&c.rx));
+    REQUIRE(c.retunes.size() == 2);
+    REQUIRE(c.retunes[1].reason == TETRA_RETUNE_MAIN);
+    REQUIRE(c.retunes[1].freq_hz == 392512500u);
+}
+
+TEST_CASE("TMO resync drops the lock without a retune", "[tmo][retune]")
+{
+    static capture c;
+    std::vector<uint8_t> bits = call_on_carrier(false);
+
+    init_retune(c, true);
+    tetra_tmo_push_bits(&c.rx, bits.data(), bits.size());
+    REQUIRE(tetra_tmo_locked(&c.rx));
+    REQUIRE(c.retunes.size() == 1);
+    tetra_tmo_resync(&c.rx);
+    REQUIRE(!tetra_tmo_locked(&c.rx));
+    REQUIRE(c.retunes.size() == 1);
 }
 
 TEST_CASE("TMO receiver decodes selected timeslots only", "[tmo][oracle]")

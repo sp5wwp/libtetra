@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 /*
- * TMO LLC (basic link), MLE routing and CMCE downlink PDUs.
+ * TMO LLC (basic link), MLE routing, CMCE downlink and uplink PDUs and
+ * carrier following.
  * EN 300 392-2 clauses 14.7, 14.8, 18.4, 21.2 and annex E.
  */
 
@@ -27,6 +28,19 @@ enum {
     D_TX_INTERRUPT = 13,
     D_CALL_RESTORE = 14,
     D_SDS_DATA = 15,
+};
+
+/* CMCE uplink PDU types (PDU type element, clause 14.8). */
+enum {
+    U_ALERT = 0,
+    U_CONNECT = 2,
+    U_DISCONNECT = 4,
+    U_RELEASE = 6,
+    U_SETUP = 7,
+    U_STATUS = 8,
+    U_TX_CEASED = 9,
+    U_TX_DEMAND = 10,
+    U_SDS_DATA = 15,
 };
 
 /* Calls idle longer than this (in frames, about 60 s) are dropped. */
@@ -93,7 +107,113 @@ static struct tetra_tmo_call_state *call_get(struct tetra_tmo_rx *rx,
     return c;
 }
 
-static void call_apply_mac(struct tetra_tmo_call_state *c,
+/* ---- Carrier following (tetra_rx_config.retune) ---- */
+
+static bool retune(struct tetra_tmo_rx *rx, const struct tetra_retune *r)
+{
+    return rx->cfg.retune && r->freq_hz && rx->cfg.retune(rx->cfg.user, r);
+}
+
+/* Back to the main carrier, unless already there. */
+static void follow_main(struct tetra_tmo_rx *rx)
+{
+    struct tetra_tmo_follow *f = &rx->follow;
+    const struct tetra_cell *cell = &rx->cell;
+    struct tetra_retune r;
+
+    f->active = false;
+    if (!cell->have_sysinfo || f->tuned == cell->main_carrier)
+        return;
+    memset(&r, 0, sizeof(r));
+    r.reason = TETRA_RETUNE_MAIN;
+    r.freq_hz = cell->dl_freq_hz;
+    r.ul_freq_hz = cell->ul_freq_hz;
+    r.carrier = cell->main_carrier;
+    if (retune(rx, &r))
+        f->tuned = cell->main_carrier;
+}
+
+static void follow_end(struct tetra_tmo_rx *rx,
+                       const struct tetra_tmo_call_state *c)
+{
+    if (rx->follow.active && rx->follow.call_id == c->call_id)
+        follow_main(rx);
+}
+
+void tmo_follow_sysinfo(struct tetra_tmo_rx *rx)
+{
+    /* SYSINFO is broadcast on the main carrier. */
+    if (!rx->follow.active)
+        rx->follow.tuned = rx->cell.main_carrier;
+}
+
+void tmo_follow_lost(struct tetra_tmo_rx *rx)
+{
+    rx->follow.pend = NULL;
+    if (rx->follow.active || (rx->follow.tuned != 0xffff &&
+                              rx->follow.tuned != rx->cell.main_carrier))
+        follow_main(rx);
+}
+
+/* Downlink channel allocation for call c, followed after the TM-SDU. */
+static void note_alloc(struct tetra_tmo_rx *rx, struct tetra_tmo_call_state *c,
+                       const struct tmo_chan_alloc *ca)
+{
+    const struct tetra_cell *cell = &rx->cell;
+    struct tetra_tmo_follow *f = &rx->follow;
+    uint8_t band = cell->band, offset = cell->offset;
+    uint8_t duplex = cell->duplex_spacing;
+    bool reverse = cell->reverse_operation;
+
+    if (!rx->cfg.retune || ca->ul_dl == 2)
+        return; /* nothing to do, or uplink only */
+    if (ca->has_ext) {
+        band = ca->band;
+        offset = ca->offset;
+        duplex = ca->duplex_spacing;
+        reverse = ca->reverse_operation;
+    } else if (!cell->have_sysinfo) {
+        return; /* band not known yet */
+    }
+    f->pend = c;
+    f->pend_carrier = ca->carrier;
+    f->pend_hz = tetra_carrier_hz(band, ca->carrier, offset);
+    f->pend_ul_hz = tetra_uplink_hz(f->pend_hz, band, duplex, reverse);
+}
+
+static void follow_check(struct tetra_tmo_rx *rx)
+{
+    struct tetra_tmo_follow *f = &rx->follow;
+    struct tetra_tmo_call_state *c = f->pend;
+    struct tetra_retune r;
+
+    f->pend = NULL;
+    if (!c || !c->used || f->pend_carrier == f->tuned)
+        return;
+    if (f->active && f->call_id != c->call_id)
+        return; /* busy following another call */
+    memset(&r, 0, sizeof(r));
+    r.reason = TETRA_RETUNE_CALL;
+    r.freq_hz = f->pend_hz;
+    r.ul_freq_hz = f->pend_ul_hz;
+    r.carrier = f->pend_carrier;
+    r.call_id = c->call_id;
+    r.dst_ssi = c->dst_ssi;
+    r.timeslots = c->timeslots;
+    r.addressed = tmo_addressed(rx, c->dst_ssi) ||
+                  (rx->cfg.issi && c->talker_ssi == rx->cfg.issi);
+    if (!r.addressed && !rx->cfg.promiscuous)
+        return;
+    if (!retune(rx, &r))
+        return;
+    f->tuned = f->pend_carrier;
+    f->call_id = c->call_id;
+    f->active =
+        !rx->cell.have_sysinfo || f->pend_carrier != rx->cell.main_carrier;
+}
+
+static void call_apply_mac(struct tetra_tmo_rx *rx,
+                           struct tetra_tmo_call_state *c,
                            const struct tmo_macinfo *mi)
 {
     if (mi->usage_marker)
@@ -101,6 +221,7 @@ static void call_apply_mac(struct tetra_tmo_call_state *c,
     if (mi->has_ca) {
         c->timeslots = mi->ca.timeslots;
         c->carrier = mi->ca.carrier;
+        note_alloc(rx, c, &mi->ca);
     }
     if (tmo_macinfo_encrypted(mi)) {
         c->encrypted = true;
@@ -190,7 +311,7 @@ static void cmce_setup(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
 
     comm = (bsi >> 2) & 3;
     c = call_get(rx, id, &created);
-    call_apply_mac(c, mi);
+    call_apply_mac(rx, c, mi);
     c->dst_ssi = mi->ssi;
     c->group = comm != 0;
     call_apply_bsi(c, bsi);
@@ -215,7 +336,7 @@ static void cmce_connect(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
     if (b->err)
         return;
     c = call_get(rx, id, &created);
-    call_apply_mac(c, mi);
+    call_apply_mac(rx, c, mi);
     if (created)
         c->dst_ssi = mi->ssi;
     (void)ack;
@@ -245,7 +366,7 @@ static void cmce_tx_granted(struct tetra_tmo_rx *rx,
         return;
 
     c = call_get(rx, id, &created);
-    call_apply_mac(c, mi);
+    call_apply_mac(rx, c, mi);
     if (created)
         c->dst_ssi = mi->ssi;
     if (grant != 0 && grant != 3)
@@ -268,7 +389,7 @@ static void cmce_tx_ceased(struct tetra_tmo_rx *rx,
     c = call_find(rx, id);
     if (!c || b->err)
         return;
-    call_apply_mac(c, mi);
+    call_apply_mac(rx, c, mi);
     if (!c->tx_active)
         return; /* repetition */
     emit_call(rx, c, TETRA_CALL_TX_CEASED, 0);
@@ -302,7 +423,7 @@ static void cmce_alert(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
 
     /* Sent to the calling party, usually before the D-SETUP. */
     c = call_get(rx, id, &created);
-    call_apply_mac(c, mi);
+    call_apply_mac(rx, c, mi);
     if (created)
         c->talker_ssi = mi->ssi;
     if (bsi < 0x100)
@@ -322,6 +443,8 @@ static void call_renumber(struct tetra_tmo_rx *rx,
 
     if (old && old != c)
         old->used = false;
+    if (rx->follow.active && rx->follow.call_id == c->call_id)
+        rx->follow.call_id = id;
     c->call_id = id;
 }
 
@@ -352,7 +475,7 @@ static void cmce_info(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
     c = call_find(rx, id);
     if (!c || b->err)
         return;
-    call_apply_mac(c, mi);
+    call_apply_mac(rx, c, mi);
     if (new_id < 0x10000)
         call_renumber(rx, c, (uint16_t)new_id);
     emit_call_st(rx, c, TETRA_CALL_INFO, 0, status);
@@ -369,7 +492,7 @@ static void cmce_tx_wait(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
     c = call_find(rx, id);
     if (!c || b->err)
         return;
-    call_apply_mac(c, mi);
+    call_apply_mac(rx, c, mi);
     if (cont && go) {
         if (c->tx_active)
             return; /* repetition */
@@ -404,7 +527,7 @@ static void cmce_tx_interrupt(struct tetra_tmo_rx *rx,
     c = call_find(rx, id);
     if (!c || b->err)
         return;
-    call_apply_mac(c, mi);
+    call_apply_mac(rx, c, mi);
     if (grant != 0 && grant != 3)
         return;
     if (c->tx_active && talker && c->talker_ssi == talker)
@@ -436,7 +559,7 @@ static void cmce_restore(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
     if (b->err)
         return;
     c = call_get(rx, id, &created);
-    call_apply_mac(c, mi);
+    call_apply_mac(rx, c, mi);
     if (created)
         c->dst_ssi = mi->ssi;
     if (new_id < 0x10000)
@@ -455,13 +578,16 @@ static void cmce_release(struct tetra_tmo_rx *rx, struct bitrd *b)
         return;
     emit_call(rx, c, TETRA_CALL_RELEASE, cause);
     c->used = false;
+    follow_end(rx, c);
 }
 
 static void emit_sds(struct tetra_tmo_rx *rx, struct tetra_sds *s)
 {
     struct tetra_event ev;
 
-    s->addressed = tmo_addressed(rx, s->dst_ssi);
+    s->addressed =
+        tmo_addressed(rx, s->dst_ssi) ||
+        (rx->in_uplink && rx->cfg.issi && s->src_ssi == rx->cfg.issi);
     if (!s->addressed && !rx->cfg.promiscuous)
         return;
     memset(&ev, 0, sizeof(ev));
@@ -470,36 +596,43 @@ static void emit_sds(struct tetra_tmo_rx *rx, struct tetra_sds *s)
     tmo_emit(rx, &ev);
 }
 
-static void cmce_sds(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
+/* Pre-coded status, or short data type identifier and user data. */
+static void sds_body(struct tetra_tmo_rx *rx, struct tetra_sds *s,
                      struct bitrd *b, bool status)
 {
-    struct tetra_sds s;
     static const uint8_t udd_len[3] = { 16, 32, 64 };
     uint8_t data[(2047 + 7) / 8];
     unsigned n;
 
-    memset(&s, 0, sizeof(s));
-    s.dst_ssi = mi->ssi;
-    s.src_ssi = party_addr(b, br_get(b, 2), &s.src_ext);
-    s.complete = true;
-
+    s->complete = true;
     if (status) {
-        s.type = TETRA_SDS_STATUS;
-        s.status = (uint16_t)br_get(b, 16);
+        s->type = TETRA_SDS_STATUS;
+        s->status = (uint16_t)br_get(b, 16);
         if (!b->err)
-            emit_sds(rx, &s);
+            emit_sds(rx, s);
         return;
     }
 
-    s.type = (enum tetra_sds_type)br_get(b, 2);
-    n = s.type == TETRA_SDS_UDD4 ? br_get(b, 11) : udd_len[s.type];
+    s->type = (enum tetra_sds_type)br_get(b, 2);
+    n = s->type == TETRA_SDS_UDD4 ? br_get(b, 11) : udd_len[s->type];
     if (b->err || n > br_left(b))
         return;
     memset(data, 0, sizeof(data));
     bits_copy(data, 0, b->buf, b->pos, n);
-    s.data = data;
-    s.nbits = (uint16_t)n;
-    emit_sds(rx, &s);
+    s->data = data;
+    s->nbits = (uint16_t)n;
+    emit_sds(rx, s);
+}
+
+static void cmce_sds(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
+                     struct bitrd *b, bool status)
+{
+    struct tetra_sds s;
+
+    memset(&s, 0, sizeof(s));
+    s.dst_ssi = mi->ssi;
+    s.src_ssi = party_addr(b, br_get(b, 2), &s.src_ext);
+    sds_body(rx, &s, b, status);
 }
 
 /* Kept out of line so its stack does not add to the MLE and MM paths. */
@@ -613,24 +746,18 @@ static void mle_pdu(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
                  e);
 }
 
-void tmo_llc(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
-             const uint8_t *buf, unsigned start, unsigned end)
+/*
+ * LLC basic link header and FCS (clause 21.2.2), the same in both
+ * directions. Advanced link PDUs are reported raw. Returns false if no
+ * TL-SDU follows, else [*start, *end) is the MLE PDU.
+ */
+static bool llc_sdu(struct tetra_tmo_rx *rx, uint32_t addr, const uint8_t *buf,
+                    unsigned *start, unsigned *end)
 {
     struct bitrd b;
-    unsigned type;
+    unsigned type, e = *end;
 
-    if (end <= start) {
-        /* MAC-only resource: update usage marker / channel allocation */
-        for (unsigned i = 0; i < TETRA_TMO_MAX_CALLS; i++) {
-            struct tetra_tmo_call_state *c = &rx->calls[i];
-
-            if (c->used && c->dst_ssi == mi->ssi && mi->ssi)
-                call_apply_mac(c, mi);
-        }
-        return;
-    }
-
-    br_init(&b, buf, start, end);
+    br_init(&b, buf, *start, e);
     type = br_get(&b, 4);
     switch (type & 7) {
     case 0: /* BL-ADATA */
@@ -644,25 +771,45 @@ void tmo_llc(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
         break;
     }
     if (type >= 8) {
-        emit_pdu(rx, TETRA_PROTO_LLC, (uint8_t)type, mi->ssi, buf, start, end);
-        return;
+        emit_pdu(rx, TETRA_PROTO_LLC, (uint8_t)type, addr, buf, *start, e);
+        return false;
     }
     if (type & 4) {
         unsigned fcs_pos;
         uint32_t fcs = 0;
 
         if (br_left(&b) < 32)
-            return;
-        fcs_pos = end - 32;
+            return false;
+        fcs_pos = e - 32;
         for (unsigned i = 0; i < 32; i++)
             fcs = (fcs << 1) | bit_at(buf, fcs_pos + i);
         if (tetra_fcs32_packed(buf, b.pos, fcs_pos - b.pos) != fcs)
-            return;
-        end = fcs_pos;
+            return false;
+        e = fcs_pos;
     }
-    if (b.err || b.pos >= end)
-        return;
-    mle_pdu(rx, mi, buf, b.pos, end);
+    if (b.err || b.pos >= e)
+        return false;
+    *start = b.pos;
+    *end = e;
+    return true;
+}
+
+void tmo_llc(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
+             const uint8_t *buf, unsigned start, unsigned end)
+{
+    rx->follow.pend = NULL;
+    if (end <= start) {
+        /* MAC-only resource: update usage marker / channel allocation */
+        for (unsigned i = 0; i < TETRA_TMO_MAX_CALLS; i++) {
+            struct tetra_tmo_call_state *c = &rx->calls[i];
+
+            if (c->used && c->dst_ssi == mi->ssi && mi->ssi)
+                call_apply_mac(rx, c, mi);
+        }
+    } else if (llc_sdu(rx, mi->ssi, buf, &start, &end)) {
+        mle_pdu(rx, mi, buf, start, end);
+    }
+    follow_check(rx);
 }
 
 /* ---- Traffic and timers ---- */
@@ -733,6 +880,149 @@ void tmo_frame_tick(struct tetra_tmo_rx *rx)
         if (++c->idle_frames >= CALL_IDLE_FRAMES) {
             emit_call(rx, c, TETRA_CALL_RELEASE, 0xff);
             c->used = false;
+            follow_end(rx, c);
         }
     }
 }
+
+/* ---- Uplink ---- */
+
+#if TETRA_UPLINK_DECODE
+
+/* Called party after its type identifier: SNA, SSI or TSI. */
+static uint32_t ul_called(struct bitrd *b, uint32_t *ext)
+{
+    unsigned type = br_get(b, 2);
+
+    if (type == 0) {
+        br_skip(b, 8); /* short number address */
+        return 0;
+    }
+    if (type == 3) {
+        b->err = true;
+        return 0;
+    }
+    return party_addr(b, type, ext);
+}
+
+static void emit_ul_call(struct tetra_tmo_rx *rx, struct tetra_call *k)
+{
+    struct tetra_event ev;
+
+    k->carrier = 0xffff;
+    k->status = TETRA_CALL_ST_NONE;
+    k->addressed = tmo_addressed(rx, k->dst_ssi) ||
+                   (rx->cfg.issi && k->src_ssi == rx->cfg.issi);
+    if (!k->addressed && !rx->cfg.promiscuous)
+        return;
+    memset(&ev, 0, sizeof(ev));
+    ev.type = TETRA_EV_CALL;
+    ev.u.call = *k;
+    tmo_emit(rx, &ev);
+}
+
+/* CMCE uplink PDUs, clause 14.7. */
+static __attribute__((noinline)) void ul_cmce(struct tetra_tmo_rx *rx,
+                                              uint32_t ssi, const uint8_t *buf,
+                                              unsigned s, unsigned e)
+{
+    struct bitrd b;
+    struct tetra_call k;
+    struct tetra_sds sds;
+    unsigned type, bsi;
+
+    br_init(&b, buf, s, e);
+    type = br_get(&b, 5);
+    memset(&k, 0, sizeof(k));
+    k.src_ssi = ssi;
+
+    switch (type) {
+    case U_SETUP:
+        br_skip(&b, 4 + 1 + 1); /* area selection, hook, simplex */
+        bsi = br_get(&b, 8);
+        br_skip(&b, 1); /* request to transmit */
+        k.priority = (uint8_t)br_get(&b, 4);
+        br_skip(&b, 2); /* CLIR control */
+        k.dst_ssi = ul_called(&b, NULL);
+        k.what = TETRA_CALL_SETUP;
+        k.group = ((bsi >> 2) & 3) != 0;
+        k.encrypted = (bsi >> 4) & 1;
+        k.circuit_type = (uint8_t)(bsi >> 5);
+        break;
+    case U_TX_DEMAND:
+        k.call_id = (uint16_t)br_get(&b, 14);
+        k.priority = (uint8_t)br_get(&b, 2);
+        k.encrypted = br_get(&b, 1);
+        k.what = TETRA_CALL_TX_DEMAND;
+        break;
+    case U_TX_CEASED:
+        k.call_id = (uint16_t)br_get(&b, 14);
+        k.what = TETRA_CALL_TX_CEASED;
+        break;
+    case U_CONNECT:
+        k.call_id = (uint16_t)br_get(&b, 14);
+        k.what = TETRA_CALL_CONNECT;
+        break;
+    case U_ALERT:
+        k.call_id = (uint16_t)br_get(&b, 14);
+        k.what = TETRA_CALL_ALERT;
+        break;
+    case U_DISCONNECT:
+    case U_RELEASE:
+        k.call_id = (uint16_t)br_get(&b, 14);
+        k.cause = (uint8_t)br_get(&b, 5);
+        k.what = TETRA_CALL_RELEASE;
+        break;
+    case U_SDS_DATA:
+    case U_STATUS:
+        memset(&sds, 0, sizeof(sds));
+        sds.src_ssi = ssi;
+        br_skip(&b, 4); /* area selection */
+        sds.dst_ssi = ul_called(&b, NULL);
+        if (!b.err)
+            sds_body(rx, &sds, &b, type == U_STATUS);
+        return;
+    default:
+        emit_pdu(rx, TETRA_PROTO_CMCE, (uint8_t)type, ssi, buf, s, e);
+        return;
+    }
+    if (!b.err)
+        emit_ul_call(rx, &k);
+}
+
+void tmo_ul_llc(struct tetra_tmo_rx *rx, uint32_t ssi, const uint8_t *buf,
+                unsigned start, unsigned end)
+{
+    struct bitrd b;
+    unsigned pd, type;
+
+    if (end <= start || !llc_sdu(rx, ssi, buf, &start, &end))
+        return;
+    br_init(&b, buf, start, end);
+    pd = br_get(&b, 3);
+    if (b.err)
+        return;
+    if (pd == TETRA_PROTO_CMCE) {
+        ul_cmce(rx, ssi, buf, b.pos, end);
+        return;
+    }
+    /* MM, SNDCP: 4-bit PDU type; MLE: 3 bits. Reported raw. */
+    type = br_get(&b, pd == TETRA_PROTO_MLE ? 3 : 4);
+    if (!b.err)
+        emit_pdu(rx, (enum tetra_proto)pd, (uint8_t)type, ssi, buf,
+                 b.pos - (pd == TETRA_PROTO_MLE ? 3 : 4), end);
+}
+
+void tmo_ul_encrypted(struct tetra_tmo_rx *rx, uint32_t ssi)
+{
+    struct tetra_event ev;
+
+    memset(&ev, 0, sizeof(ev));
+    ev.type = TETRA_EV_PDU;
+    ev.u.pdu.proto = TETRA_PROTO_LLC;
+    ev.u.pdu.addr = ssi;
+    ev.u.pdu.encrypted = true;
+    tmo_emit(rx, &ev);
+}
+
+#endif /* TETRA_UPLINK_DECODE */

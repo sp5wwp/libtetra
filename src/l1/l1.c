@@ -11,6 +11,13 @@ const uint8_t tetra_seq_p[22] = { 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0,
 const uint8_t tetra_seq_q[22] = { 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0,
                                   0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1 };
 
+/* EN 300 392-2 clause 9.4.4.3: extended training sequence (uplink CB) */
+const uint8_t tetra_seq_x[30] = { 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 1,
+                                  0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1 };
+
+/* EN 300 392-2 clause 9.4.4.3: tail bits of the uplink bursts */
+const uint8_t tetra_tail[4] = { 1, 1, 0, 0 };
+
 /* EN 300 392-2 (9.11), EN 300 396-2 (66) */
 const uint8_t tetra_seq_y[38] = { 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1,
                                   1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1,

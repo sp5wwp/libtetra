@@ -106,3 +106,22 @@ void tetra_tmo_build_sb(uint8_t slot[510], const uint8_t sb[120],
     phase_adjust(slot, 12, 8, 108);
     phase_adjust(slot, 498, 109, 249);
 }
+
+void tetra_tmo_build_cb(uint8_t burst[206], const uint8_t cb[168])
+{
+    memcpy(burst, tetra_tail, 4);
+    memcpy(burst + 4, cb, 84);
+    memcpy(burst + 88, tetra_seq_x, 30);
+    memcpy(burst + 118, cb + 84, 84);
+    memcpy(burst + 202, tetra_tail, 4);
+}
+
+void tetra_tmo_build_nub(uint8_t burst[462], const uint8_t bkn1[216],
+                         const uint8_t bkn2[216], bool two_blocks)
+{
+    memcpy(burst, tetra_tail, 4);
+    memcpy(burst + 4, bkn1, 216);
+    memcpy(burst + 220, two_blocks ? tetra_seq_p : tetra_seq_n, 22);
+    memcpy(burst + 242, bkn2, 216);
+    memcpy(burst + 458, tetra_tail, 4);
+}

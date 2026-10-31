@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 /*
- * TMO downlink receiver: synchronisation, TDMA tracking and slot dispatch.
+ * TMO receiver: downlink synchronisation, TDMA tracking and slot dispatch;
+ * uplink burst recognition and decoding while not synchronised.
  * EN 300 392-2 clauses 9.4.4, 9.5 and 19.
  */
 
@@ -27,7 +28,11 @@ static const int8_t search_order[] = { 0, -2, 2, -4, 4 };
 void tmo_emit(struct tetra_tmo_rx *rx, struct tetra_event *ev)
 {
     ev->mode = TETRA_MODE_TMO;
-    ev->time = rx->t;
+    ev->uplink = rx->in_uplink;
+    if (rx->in_uplink)
+        memset(&ev->time, 0, sizeof(ev->time));
+    else
+        ev->time = rx->t;
     if (rx->cfg.cb)
         rx->cfg.cb(rx->cfg.user, ev);
 }
@@ -50,6 +55,7 @@ void tetra_tmo_init(struct tetra_tmo_rx *rx, const struct tetra_rx_config *cfg)
     memset(rx, 0, sizeof(*rx));
     rx->cfg = *cfg;
     rx->slots = TETRA_TS_ALL;
+    rx->follow.tuned = 0xffff;
     memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
 }
 
@@ -83,7 +89,8 @@ bool tetra_tmo_locked(const struct tetra_tmo_rx *rx)
     return rx->locked;
 }
 
-static void set_lock(struct tetra_tmo_rx *rx, bool locked)
+/* follow: ask to return to the main carrier when the lock is lost. */
+static void set_lock(struct tetra_tmo_rx *rx, bool locked, bool follow)
 {
     struct tetra_event ev;
 
@@ -93,19 +100,33 @@ static void set_lock(struct tetra_tmo_rx *rx, bool locked)
 #if TETRA_UPLINK_DETECT
     memset(&rx->ul, 0, sizeof(rx->ul));
 #endif
-    if (!locked) {
-        memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
-        for (unsigned i = 0; i < 4; i++) {
-            rx->frag[i].active = false;
-#if TETRA_ENABLE_CRYPTO
-            memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
+#if TETRA_UPLINK_DECODE
+    rx->uld.pending = 0;
 #endif
-        }
+    /* The uplink decoder reassembles in frag[0] while not locked. */
+    for (unsigned i = 0; i < 4; i++) {
+        rx->frag[i].active = false;
+#if TETRA_ENABLE_CRYPTO
+        memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
+#endif
     }
+    if (!locked)
+        memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
     memset(&ev, 0, sizeof(ev));
     ev.type = TETRA_EV_SYNC;
     ev.u.sync.locked = locked;
     tmo_emit(rx, &ev);
+    if (!locked && follow)
+        tmo_follow_lost(rx);
+}
+
+void tetra_tmo_resync(struct tetra_tmo_rx *rx)
+{
+    rx->cand = false;
+    rx->follow.active = false;
+    rx->follow.pend = NULL;
+    rx->follow.tuned = 0xffff; /* the application chose the frequency */
+    set_lock(rx, false, false);
 }
 
 void tmo_advance_time(struct tetra_tmo_rx *rx)
@@ -311,13 +332,35 @@ static void locked_slot(struct tetra_tmo_rx *rx)
 
     if (best < TRAIN_MIN) {
         if (++rx->bad_slots >= LOCK_LOSS_SLOTS)
-            set_lock(rx, false);
+            set_lock(rx, false, true);
         return;
     }
     rx->bad_slots = 0;
     rx->slot_start += (uint32_t)best_off;
     process_slot(rx, rx->slot_start, kind == 2, kind == 0);
 }
+
+#if TETRA_UPLINK_DETECT || TETRA_UPLINK_DECODE
+/* Uplink training sequences n, p and x as integers, first bit as MSB. */
+#define UL_SEQ_N 0x343a74u
+#define UL_SEQ_P 0x1e90deu
+#define UL_SEQ_X 0x2743a743u
+
+static unsigned seq_errors(uint32_t sr, uint32_t word, unsigned n)
+{
+    return tetra_popcount32((sr ^ word) & ((1u << n) - 1));
+}
+
+/*
+ * n/p ending at bit count wr is part of a continuous downlink: q11..q22
+ * starts 244 bits before it, q1 10 more.
+ */
+static bool np_in_downlink(const struct tetra_rxcore *c, uint32_t wr)
+{
+    return wr > 22 + 254 &&
+           rxcore_corr(c, wr - 22 - 254, tetra_seq_q, 22) >= TRAIN_MIN;
+}
+#endif
 
 #if TETRA_UPLINK_DETECT
 /*
@@ -327,9 +370,6 @@ static void locked_slot(struct tetra_tmo_rx *rx)
  * sequence q that a continuous downlink carries across slot boundaries.
  * The sync training sequence y (downlink, DMO) cancels the evidence.
  */
-#define UL_SEQ_N 0x343a74u
-#define UL_SEQ_P 0x1e90deu
-#define UL_SEQ_X 0x2743a743u
 #define UL_MAX_SLOTS 8
 #define UL_SLACK 4
 /* Bits without y needed before reporting: two multiframes. */
@@ -338,20 +378,13 @@ static void locked_slot(struct tetra_tmo_rx *rx)
 #define UL_GAP 360000u
 #define UL_SCORE 4
 
-static unsigned seq_errors(uint32_t sr, uint32_t word, unsigned n)
-{
-    return tetra_popcount32((sr ^ word) & ((1u << n) - 1));
-}
-
 /* n/p hit ending at bit count wr: true if it looks like an uplink burst. */
 static bool ul_np_hit(struct tetra_tmo_uldet *ul, const struct tetra_rxcore *c,
                       uint32_t wr)
 {
-    uint32_t start = wr - 22, last = ul->last_np, d;
+    uint32_t last = ul->last_np, d;
 
-    /* Continuous downlink: q11..q22 starts 244 bits before n/p, q1 10 more */
-    if (wr > 22 + 254 &&
-        rxcore_corr(c, start - 254, tetra_seq_q, 22) >= TRAIN_MIN) {
+    if (np_in_downlink(c, wr)) {
         ul->last_dl = wr;
         return false;
     }
@@ -406,11 +439,189 @@ static void ul_detect(struct tetra_tmo_rx *rx)
 }
 #endif
 
+#if TETRA_UPLINK_DECODE
+/*
+ * Uplink burst decoding. Bursts of different MSs arrive with different
+ * timing, so each one is aligned on its own training sequence: x for the
+ * control uplink burst (SCH/HU), n or p for the normal uplink burst.
+ */
+enum { ULP_NONE = 0, ULP_CB, ULP_NUB_N, ULP_NUB_P, ULP_CB_OR_NUB };
+
+/* Normal uplink bursts failing their CRC are taken for traffic only
+ * within this many bits (10 s) of a good uplink block. */
+#define UL_TRAFFIC_WINDOW 360000u
+
+void tetra_tmo_set_uplink_cell(struct tetra_tmo_rx *rx, uint16_t mcc,
+                               uint16_t mnc, uint8_t colour_code)
+{
+    rx->uld.scramb =
+        tetra_scramb_init(tetra_tmo_colour_code(mcc, mnc, colour_code));
+    rx->uld.manual = true;
+    rx->uld.pending = ULP_NONE;
+}
+
+static void ul_traffic(struct tetra_tmo_rx *rx, enum tetra_half h1,
+                       enum tetra_half h2)
+{
+    struct tetra_event ev;
+
+    if (!rx->cfg.promiscuous)
+        return; /* the talking party is not known */
+    memset(&ev, 0, sizeof(ev));
+    ev.type = TETRA_EV_TRAFFIC;
+    ev.u.traffic.half[0] = h1;
+    ev.u.traffic.half[1] = h2;
+    ev.u.traffic.bits = rx->tch;
+    tmo_emit(rx, &ev);
+}
+
+/*
+ * Tail bits of a normal uplink burst whose blocks start at b1 and b2: noise
+ * often holds n or p, so traffic is only taken from complete bursts.
+ */
+static bool ul_tails_ok(const struct tetra_rxcore *c, uint32_t b1, uint32_t b2)
+{
+    unsigned err = 0;
+
+    for (unsigned i = 0; i < 4; i++) {
+        err += (rxcore_at(c, b1 - 4 + i) > 0) != tetra_tail[i];
+        err += (rxcore_at(c, b2 + 216 + i) > 0) != tetra_tail[i];
+    }
+    return err <= 1;
+}
+
+static bool ul_decode_half(struct tetra_tmo_rx *rx, uint32_t pos, uint8_t *out)
+{
+    rxcore_copy(&rx->core, pos, rx->ws.in, 216);
+    return lmac_decode(&rx->ws, LMAC_SCH_H, rx->ws.in, rx->uld.scramb, out);
+}
+
+/* Normal uplink burst with p: STCH in block 1, as on the downlink. */
+static bool ul_stolen(struct tetra_tmo_rx *rx, uint32_t b1, uint32_t b2,
+                      bool traffic_ok)
+{
+    enum tetra_half h1 = TETRA_HALF_STOLEN_C, h2 = TETRA_HALF_TCH;
+    bool ok1 = ul_decode_half(rx, b1, rx->blk[0]), ok2 = false;
+    int fl = 0;
+
+    if (ok1) {
+        if ((rx->blk[0][0] >> 6) == 3)
+            h1 = TETRA_HALF_STOLEN_U;
+        fl = tmo_ul_block(rx, TMO_UL_STCH, rx->blk[0], 124);
+    }
+    if (!ok1 || (fl & TMO_MAC_HALF2_STOLEN))
+        ok2 = ul_decode_half(rx, b2, rx->blk[1]);
+    if (ok2) {
+        h2 = (rx->blk[1][0] >> 6) == 3 ? TETRA_HALF_STOLEN_U
+                                       : TETRA_HALF_STOLEN_C;
+        tmo_ul_block(rx, TMO_UL_STCH, rx->blk[1], 124);
+    }
+    if (h2 == TETRA_HALF_TCH &&
+        (ok1 || (traffic_ok && ul_tails_ok(&rx->core, b1, b2)))) {
+        memset(rx->tch, 0, 216);
+        rxcore_copy(&rx->core, b2, rx->tch + 216, 216);
+        lmac_descramble(&rx->ws, rx->tch + 216, 216, rx->uld.scramb);
+        ul_traffic(rx, h1, h2);
+    }
+    return ok1 || ok2;
+}
+
+static __attribute__((noinline)) void ul_decode(struct tetra_tmo_rx *rx)
+{
+    struct tetra_tmo_ul *u = &rx->uld;
+    uint32_t te = u->train_end, wr = rx->core.wr;
+    int8_t *b = rx->ws.in;
+    bool ok = false;
+    bool traffic_ok = u->last_ok && wr - u->last_ok < UL_TRAFFIC_WINDOW;
+
+    rx->in_uplink = true;
+    if (u->pending == ULP_CB || u->pending == ULP_CB_OR_NUB) {
+        /* For ULP_CB_OR_NUB train_end is the end of n: x ends 4 later. */
+        uint32_t xe = u->pending == ULP_CB ? te : te + 4;
+        uint32_t x = xe - TMO_CB_TRAIN;
+
+        rxcore_copy(&rx->core, x - TMO_CB_HALF, b, TMO_CB_HALF);
+        rxcore_copy(&rx->core, xe, b + TMO_CB_HALF, TMO_CB_HALF);
+        ok = lmac_decode(&rx->ws, LMAC_SCH_HU, b, u->scramb, rx->blk[0]);
+        if (ok)
+            tmo_ul_block(rx, TMO_UL_SCH_HU, rx->blk[0], 92);
+        else if (u->pending == ULP_CB_OR_NUB)
+            u->pending = ULP_NUB_N; /* a normal burst after all */
+    }
+    if (u->pending == ULP_NUB_P) {
+        ok = ul_stolen(rx, te - TMO_NUB_TRAIN - 216, te, traffic_ok);
+    } else if (u->pending == ULP_NUB_N) {
+        uint32_t b1 = te - TMO_NUB_TRAIN - 216, b2 = te;
+
+        rxcore_copy(&rx->core, b1, b, 216);
+        rxcore_copy(&rx->core, b2, b + 216, 216);
+        ok = lmac_decode(&rx->ws, LMAC_SCH_F, b, u->scramb, rx->blk[0]);
+        if (ok) {
+            tmo_ul_block(rx, TMO_UL_SCH_F, rx->blk[0], 268);
+        } else if (traffic_ok && ul_tails_ok(&rx->core, b1, b2)) {
+            rxcore_copy(&rx->core, b1, rx->tch, 216);
+            rxcore_copy(&rx->core, b2, rx->tch + 216, 216);
+            lmac_descramble(&rx->ws, rx->tch, TETRA_TCH_BITS, u->scramb);
+            ul_traffic(rx, TETRA_HALF_TCH, TETRA_HALF_TCH);
+        }
+    }
+    rx->in_uplink = false;
+    if (ok)
+        u->last_ok = wr ? wr : 1;
+    u->pending = ULP_NONE;
+}
+
+static void ul_search(struct tetra_tmo_rx *rx)
+{
+    struct tetra_tmo_ul *u = &rx->uld;
+    uint32_t sr = (uint32_t)rx->core.hard_sr, wr = rx->core.wr;
+
+    if (!u->scramb)
+        return;
+    /*
+     * x holds n in its bits 5..26, so a control burst matches n 4 bits
+     * before x is complete. Real normal bursts often carry bits around n
+     * that complete an x: such a burst is tried as a control burst and,
+     * if that fails, decoded as the normal burst, which ends later.
+     */
+    if (u->pending == ULP_NUB_N && wr - u->train_end == 4 &&
+        seq_errors(sr, UL_SEQ_X, 30) <= 2) {
+        u->pending = ULP_CB_OR_NUB;
+        return;
+    }
+    if (u->pending) {
+        if ((int32_t)(wr - u->due) >= 0)
+            ul_decode(rx);
+        return;
+    }
+    if (wr >= TMO_CB_TRAIN + TMO_CB_HALF && seq_errors(sr, UL_SEQ_X, 30) <= 2) {
+        u->pending = ULP_CB;
+        u->due = wr + TMO_CB_HALF;
+        u->train_end = wr;
+        return;
+    }
+    if (wr < TMO_NUB_TRAIN + 216 ||
+        (seq_errors(sr, UL_SEQ_N, 22) > 1 &&
+         seq_errors(sr, UL_SEQ_P, 22) > 1) ||
+        np_in_downlink(&rx->core, wr))
+        return;
+    u->pending = rxcore_corr(&rx->core, wr - 22, tetra_seq_n, 22) >
+                         rxcore_corr(&rx->core, wr - 22, tetra_seq_p, 22)
+                     ? ULP_NUB_N
+                     : ULP_NUB_P;
+    u->due = wr + 216 + 4; /* block 2 and the tail bits */
+    u->train_end = wr;
+}
+#endif
+
 /* Not synchronised: look for the sync burst (and uplink bursts). */
 static __attribute__((noinline)) void search(struct tetra_tmo_rx *rx)
 {
 #if TETRA_UPLINK_DETECT
     ul_detect(rx);
+#endif
+#if TETRA_UPLINK_DECODE
+    ul_search(rx);
 #endif
     if (!rx->cand && rxcore_sync_hit(&rx->core)) {
         /* y38 is the bit just received */
@@ -425,7 +636,7 @@ static __attribute__((noinline)) void cand_check(struct tetra_tmo_rx *rx)
     if (decode_bsch(rx, rx->cand_start)) {
         rx->slot_start = rx->cand_start;
         rx->bad_slots = 0;
-        set_lock(rx, true);
+        set_lock(rx, true, false);
         /* decode_bsch() set the time; handle the rest of the slot */
         process_slot(rx, rx->slot_start, true, false);
         rx->slot_start += SLOT_BITS;

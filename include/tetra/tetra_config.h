@@ -44,4 +44,10 @@
 #undef TETRA_UPLINK_DETECT
 #define TETRA_UPLINK_DETECT 1
 
+#if defined(TETRA_UPLINK_DECODE) && TETRA_UPLINK_DECODE != 1
+#error "TETRA_UPLINK_DECODE must be configured through CMake"
+#endif
+#undef TETRA_UPLINK_DECODE
+#define TETRA_UPLINK_DECODE 1
+
 #endif /* TETRA_CONFIG_H */

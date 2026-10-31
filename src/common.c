@@ -11,6 +11,34 @@ uint32_t tetra_carrier_hz(uint8_t band, uint16_t carrier, uint8_t offset)
                       off_hz[offset & 3]);
 }
 
+uint32_t tetra_uplink_hz(uint32_t dl_hz, uint8_t band, uint8_t duplex_spacing,
+                         bool reverse)
+{
+    /* Duplex spacing in kHz, TS 100 392-15 table 2; R is reserved. */
+#define R 0xffffu
+    static const uint16_t spacing_khz[8][16] = {
+        { R, 1600, 10000, 10000, 10000, 10000, 10000, R, R, R, R, R, R, R, R,
+          R },
+        { R, 4500, R, 36000, 7000, R, R, R, 45000, 45000, R, R, R, R, R, R },
+        { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 },
+        { R, R, R, 8000, 8000, R, R, R, 18000, 18000, R, R, R, R, R, R },
+        { R, R, R, 18000, 5000, R, 30000, 30000, R, 39000, R, R, R, R, R, R },
+        { R, R, R, R, 9500, R, R, R, R, R, R, R, R, R, R, R },
+        { R, R, R, R, R, R, R, R, R, R, R, R, R, R, R, R },
+        { R, R, R, R, R, R, R, R, R, R, R, R, R, R, R, R },
+    };
+    unsigned khz = spacing_khz[duplex_spacing & 7][band & 15];
+#undef R
+    uint32_t d;
+
+    if (khz == 0xffffu || !dl_hz)
+        return 0;
+    d = (uint32_t)khz * 1000u;
+    if (reverse)
+        return dl_hz + d;
+    return d < dl_hz ? dl_hz - d : 0;
+}
+
 static int16_t etsi_soft(int8_t s)
 {
     /* '1' maps to negative values; scale the +-64 range to +-127 */

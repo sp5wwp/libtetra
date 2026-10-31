@@ -4,10 +4,11 @@
 #include <tetra/tetra_coding.h>
 #include "lmac.h"
 
-const struct lmac_chan_def lmac_chan_defs[3] = {
+const struct lmac_chan_def lmac_chan_defs[4] = {
     [LMAC_SCH_S] = { 60, 120, 11 },
     [LMAC_SCH_H] = { 124, 216, 101 },
     [LMAC_SCH_F] = { 268, 432, 103 },
+    [LMAC_SCH_HU] = { 92, 168, 13 },
 };
 
 /* Scrambling sequence for init, from a two-entry cache. */

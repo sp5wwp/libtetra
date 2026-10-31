@@ -14,7 +14,16 @@
  * traffic/signalling is left opaque and reported as encrypted.
  *
  * While not synchronised, the receiver recognises TMO uplink transmissions
- * and reports them once with TETRA_EV_SIGNAL (TETRA_UPLINK_DETECT).
+ * and reports them once with TETRA_EV_SIGNAL (TETRA_UPLINK_DETECT). Once the
+ * colour code of the cell is known, from a downlink received before or from
+ * tetra_tmo_set_uplink_cell(), uplink bursts are also decoded
+ * (TETRA_UPLINK_DECODE): random access and signalling (call set-up,
+ * transmit demands, SDS, status) and traffic, reported with
+ * tetra_event.uplink set. Uplink encryption is reported, not decrypted.
+ *
+ * With tetra_rx_config.retune set, the receiver asks the application to
+ * follow calls allocated to other carriers of the cell, and to return to
+ * the main carrier afterwards.
  */
 
 #include <stddef.h>
@@ -84,6 +93,27 @@ struct tetra_tmo_uldet {
     uint32_t last_dl; /* bit count at the last downlink evidence */
 };
 
+#if TETRA_UPLINK_DECODE
+struct tetra_tmo_ul {
+    uint32_t scramb;    /* scrambler state, 0 = colour code unknown */
+    uint32_t train_end; /* bit count just after the pending training seq. */
+    uint32_t due;       /* bit count completing the pending burst */
+    uint32_t last_ok;   /* bit count at the last good uplink block, 0 = none */
+    uint8_t pending;    /* burst waiting for its last bits, 0 = none */
+    bool manual;        /* colour code set by the application */
+};
+#endif
+
+struct tetra_tmo_follow {
+    bool active; /* following call_id away from the main carrier */
+    uint16_t call_id;
+    uint16_t tuned; /* carrier received now, 0xffff = unknown */
+    uint16_t pend_carrier;
+    uint32_t pend_hz;
+    uint32_t pend_ul_hz;
+    struct tetra_tmo_call_state *pend; /* allocation seen in this TM-SDU */
+};
+
 #if TETRA_ENABLE_CRYPTO
 /** Context passed to the application key provider. */
 struct tetra_tmo_key_request {
@@ -123,6 +153,7 @@ struct tetra_tmo_rx {
     bool locked;
     bool cand;
     bool have_network;
+    bool in_uplink; /* events come from the uplink */
     uint8_t slots;
     uint16_t bad_slots;
     uint32_t slot_start;
@@ -144,6 +175,10 @@ struct tetra_tmo_rx {
 #if TETRA_UPLINK_DETECT
     struct tetra_tmo_uldet ul;
 #endif
+#if TETRA_UPLINK_DECODE
+    struct tetra_tmo_ul uld;
+#endif
+    struct tetra_tmo_follow follow;
 };
 
 /**
@@ -207,6 +242,35 @@ void tetra_tmo_push_bits(struct tetra_tmo_rx *rx, const uint8_t *bits,
  * @param mask: TETRA_TS1..TETRA_TS4 combined, TETRA_TS_ALL by default.
  */
 void tetra_tmo_set_slots(struct tetra_tmo_rx *rx, uint8_t mask);
+
+/**
+ * \brief Drop synchronisation, for example after the application tuned the
+ * radio to another frequency on its own. Reports TETRA_EV_SYNC (lost) if
+ * the receiver was synchronised. Cell information and the uplink colour
+ * code are kept; no retune is requested.
+ *
+ * @param rx: receiver context.
+ */
+void tetra_tmo_resync(struct tetra_tmo_rx *rx);
+
+#if TETRA_UPLINK_DECODE
+/**
+ * \brief Set the cell whose uplink is decoded.
+ *
+ * Uplink bursts are scrambled with the colour code of the cell. It is
+ * taken from the last synchronised downlink unless set here; a value set
+ * here is kept until the next call or tetra_tmo_init(). To listen to the
+ * uplink of a cell, synchronise to its downlink, tune to
+ * tetra_cell.ul_freq_hz and call tetra_tmo_resync().
+ *
+ * @param rx: receiver context.
+ * @param mcc: mobile country code.
+ * @param mnc: mobile network code.
+ * @param colour_code: colour code (6 bits).
+ */
+void tetra_tmo_set_uplink_cell(struct tetra_tmo_rx *rx, uint16_t mcc,
+                               uint16_t mnc, uint8_t colour_code);
+#endif
 
 /**
  * \brief Current cell information.

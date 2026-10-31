@@ -32,6 +32,8 @@ static void clear_cell_associations(struct tetra_tmo_rx *rx)
 #endif
     }
     memset(rx->calls, 0, sizeof(rx->calls));
+    rx->follow.active = false;
+    rx->follow.pend = NULL;
     memset(&rx->network, 0, sizeof(rx->network));
     rx->have_network = false;
     memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
@@ -63,6 +65,10 @@ void tmo_mac_sync(struct tetra_tmo_rx *rx, const uint8_t *blk)
     rx->t.fn = fn;
     rx->t.mn = mn;
     rx->scramb = tetra_scramb_init(tetra_tmo_colour_code(mcc, mnc, cc));
+#if TETRA_UPLINK_DECODE
+    if (!rx->uld.manual)
+        rx->uld.scramb = rx->scramb;
+#endif
 
     if (c->mcc != mcc || c->mnc != mnc || c->colour_code != cc ||
         c->system_code != syscode || c->sharing_mode != share) {
@@ -94,10 +100,9 @@ static bool cell_equal(const struct tetra_cell *a, const struct tetra_cell *b)
            a->have_sysinfo == b->have_sysinfo &&
            a->location_area == b->location_area &&
            a->main_carrier == b->main_carrier && a->band == b->band &&
-           a->offset == b->offset &&
-           a->duplex_spacing == b->duplex_spacing &&
+           a->offset == b->offset && a->duplex_spacing == b->duplex_spacing &&
            a->reverse_operation == b->reverse_operation &&
-           a->dl_freq_hz == b->dl_freq_hz &&
+           a->dl_freq_hz == b->dl_freq_hz && a->ul_freq_hz == b->ul_freq_hz &&
            a->hyperframe == b->hyperframe && a->cck_id == b->cck_id &&
            a->have_hyperframe == b->have_hyperframe &&
            a->have_cck_id == b->have_cck_id &&
@@ -133,6 +138,8 @@ static void parse_sysinfo(struct tetra_tmo_rx *rx, struct bitrd *b)
 
     n.air_encryption = (n.service_details >> 1) & 1;
     n.dl_freq_hz = tetra_carrier_hz(n.band, n.main_carrier, n.offset);
+    n.ul_freq_hz = tetra_uplink_hz(n.dl_freq_hz, n.band, n.duplex_spacing,
+                                   n.reverse_operation);
     n.have_sysinfo = true;
 
     /*
@@ -172,6 +179,7 @@ static void parse_sysinfo(struct tetra_tmo_rx *rx, struct bitrd *b)
         clear_cell_associations(rx);
     if (notify)
         emit_cell(rx);
+    tmo_follow_sysinfo(rx);
 }
 
 /* Channel allocation element, table 21.87. Returns false to discard. */
@@ -185,8 +193,13 @@ static bool parse_chan_alloc(struct bitrd *b, struct tmo_chan_alloc *ca)
     ca->ul_dl = (uint8_t)ud;
     br_skip(b, 1 + 1);
     ca->carrier = (uint16_t)br_get(b, 12);
-    if (br_get(b, 1))
-        br_skip(b, 4 + 2 + 3 + 1);
+    ca->has_ext = br_get(b, 1);
+    if (ca->has_ext) {
+        ca->band = (uint8_t)br_get(b, 4);
+        ca->offset = (uint8_t)br_get(b, 2);
+        ca->duplex_spacing = (uint8_t)br_get(b, 3);
+        ca->reverse_operation = br_get(b, 1);
+    }
     mon = br_get(b, 2);
     if (mon == 0)
         br_skip(b, 2);
@@ -470,14 +483,16 @@ static unsigned mac_resource(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
         br_skip(&b, 8); /* basic slot granting */
     ca_present = br_get(&b, 1);
     if (ca_present) {
-        mi.has_ca = true;
 #if TETRA_ENABLE_CRYPTO
         ca_start = b.pos;
 #endif
-        /* The channel-allocation element is itself ciphered when ENC != 0. */
-        if (mi.encryption_mode == TETRA_TMO_ENC_CLEAR &&
-            !parse_chan_alloc(&b, &mi.ca))
-            return 0;
+        /* The channel-allocation element is itself ciphered when ENC != 0:
+         * has_ca is set only once it has been parsed. */
+        if (mi.encryption_mode == TETRA_TMO_ENC_CLEAR) {
+            if (!parse_chan_alloc(&b, &mi.ca))
+                return 0;
+            mi.has_ca = true;
+        }
     }
     if (b.err)
         return 0;
@@ -599,11 +614,13 @@ static unsigned mac_frag_end(struct tetra_tmo_rx *rx, const uint8_t *blk,
 #if TETRA_ENABLE_CRYPTO
         ca_start = b.pos;
 #endif
-        mi.has_ca = true;
         /* For an encrypted fragment, CA is decrypted before it is parsed. */
-        if (!f->encrypted && !parse_chan_alloc(&b, &mi.ca)) {
-            f->active = false;
-            return 0;
+        if (!f->encrypted) {
+            if (!parse_chan_alloc(&b, &mi.ca)) {
+                f->active = false;
+                return 0;
+            }
+            mi.has_ca = true;
         }
     }
     pdu_end = li_bits(li);
@@ -650,6 +667,7 @@ static unsigned mac_frag_end(struct tetra_tmo_rx *rx, const uint8_t *blk,
             memset(f->eck, 0, sizeof(f->eck));
             return pdu_end;
         }
+        mi.has_ca = true;
     } else
 #endif
     {

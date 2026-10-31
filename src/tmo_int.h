@@ -31,8 +31,13 @@ enum tmo_addr_type {
 struct tmo_chan_alloc {
     uint8_t alloc_type;
     uint8_t timeslots; /* bitmap, bit 0 = TN1 */
-    uint8_t ul_dl;
+    uint8_t ul_dl;     /* 1: downlink only, 2: uplink only, 3: both */
     uint16_t carrier;
+    bool has_ext; /* extended carrier numbering: fields below valid */
+    uint8_t band;
+    uint8_t offset;
+    uint8_t duplex_spacing;
+    bool reverse_operation;
 };
 
 /* MAC header information passed up with a TM-SDU. */
@@ -87,6 +92,28 @@ void tmo_llc(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
 void tmo_traffic(struct tetra_tmo_rx *rx, uint8_t um, enum tetra_half h1,
                  enum tetra_half h2);
 void tmo_frame_tick(struct tetra_tmo_rx *rx);
+
+/* Carrier following (src/l3/tmo_l3.c), see tetra_rx_config.retune. */
+void tmo_follow_sysinfo(struct tetra_tmo_rx *rx);
+void tmo_follow_lost(struct tetra_tmo_rx *rx);
+
+#if TETRA_UPLINK_DECODE
+/* Uplink logical channels. */
+enum tmo_ul_lchan {
+    TMO_UL_SCH_HU = 0, /* control uplink burst, 92 bits */
+    TMO_UL_SCH_F,      /* normal uplink burst, 268 bits */
+    TMO_UL_STCH,       /* half of a normal uplink burst, 124 bits */
+};
+
+/* Uplink upper MAC (src/l2/tmo_ul_mac.c); returns TMO_MAC_HALF2_STOLEN. */
+int tmo_ul_block(struct tetra_tmo_rx *rx, enum tmo_ul_lchan ch,
+                 const uint8_t *blk, unsigned nbits);
+
+/* Uplink LLC and layer 3 (src/l3/tmo_l3.c). ssi is the sending MS. */
+void tmo_ul_llc(struct tetra_tmo_rx *rx, uint32_t ssi, const uint8_t *buf,
+                unsigned start, unsigned end);
+void tmo_ul_encrypted(struct tetra_tmo_rx *rx, uint32_t ssi);
+#endif
 
 /* ---- Type 2 / type 3 element helpers (annex E) ---- */
 

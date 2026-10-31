@@ -15,6 +15,8 @@ option(TETRA_BUILD_TESTS "Build unit tests (Catch2)" ${TETRA_HOST_DEFAULT})
 option(TETRA_ENABLE_CRYPTO "Build TEA/TB5 and TMO decryption support" OFF)
 option(TETRA_UPLINK_DETECT
        "Recognise TMO uplink signals while not synchronised" ON)
+option(TETRA_UPLINK_DECODE
+       "Decode TMO uplink bursts while not synchronised to a downlink" ON)
 
 # These values affect public receiver-context layouts and must match between
 # libtetra and every consumer. Configure them here; the generated public
@@ -50,6 +52,11 @@ if(TETRA_UPLINK_DETECT)
 else()
     set(TETRA_UPLINK_DETECT_VALUE 0)
 endif()
+if(TETRA_UPLINK_DECODE)
+    set(TETRA_UPLINK_DECODE_VALUE 1)
+else()
+    set(TETRA_UPLINK_DECODE_VALUE 0)
+endif()
 set(TETRA_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${TETRA_GENERATED_INCLUDE_DIR}/tetra")
 configure_file(
@@ -73,6 +80,7 @@ add_library(tetra STATIC
     src/l2/lmac.c
     src/l2/speech.c
     src/l2/tmo_mac.c
+    src/l2/tmo_ul_mac.c
     src/l3/dmo_cc.c
     src/l3/lip.c
     src/l3/sds.c
@@ -164,7 +172,7 @@ if(TETRA_BUILD_TESTS)
     enable_testing()
     find_package(Catch2 3 REQUIRED)
 
-    set(TETRA_TESTS coding dmo sds speech tmo tmo_l3)
+    set(TETRA_TESTS coding dmo sds speech tmo tmo_l3 tmo_ul)
     if(TETRA_ENABLE_CRYPTO)
         list(APPEND TETRA_TESTS crypto)
     endif()

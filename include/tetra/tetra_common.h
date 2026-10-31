@@ -76,6 +76,7 @@ struct tetra_cell {
     uint8_t duplex_spacing; /**< Raw code, see TS 100 392-15. */
     bool reverse_operation;
     uint32_t dl_freq_hz;      /**< Downlink frequency of the main carrier. */
+    uint32_t ul_freq_hz;      /**< Its uplink frequency, 0 if unknown. */
     uint16_t hyperframe;      /**< Last broadcast hyperframe number. */
     uint16_t cck_id;          /**< Last broadcast CCK identifier. */
     bool have_hyperframe;     /**< A hyperframe value has been received. */
@@ -194,6 +195,7 @@ enum tetra_call_what {
     TETRA_CALL_TX_INTERRUPT, /**< TMO: transmission given to another. */
     TETRA_CALL_TX_CONTINUE,  /**< TMO: halted transmission may resume. */
     TETRA_CALL_RESTORE,      /**< TMO: call restored after a cell change. */
+    TETRA_CALL_TX_DEMAND,    /**< TMO uplink: a party asks to transmit. */
 };
 
 /** TMO call status (EN 300 392-2 table 14.47), tetra_call.status. */
@@ -310,6 +312,13 @@ struct tetra_pdu {
 struct tetra_event {
     enum tetra_event_type type;
     enum tetra_mode mode;
+    /**
+     * TMO uplink (MS to base station). time is not known on the uplink and
+     * is zero. Call, SDS, PDU and traffic events can come from the uplink:
+     * src_ssi is then the sending MS, and call_id / usage_marker are 0 when
+     * the PDU does not carry them. PDU types use the uplink numbering.
+     */
+    bool uplink;
     struct tetra_time time;
     union {
         struct tetra_sync sync;
@@ -336,6 +345,41 @@ struct tetra_event {
  */
 typedef void (*tetra_event_cb)(void *user, const struct tetra_event *ev);
 
+/** Why a TMO receiver asks for another frequency. */
+enum tetra_retune_reason {
+    TETRA_RETUNE_CALL = 0, /**< Follow a call to its allocated carrier. */
+    TETRA_RETUNE_MAIN,     /**< Back to the main carrier of the cell. */
+};
+
+/** Retune request, see tetra_retune_cb. */
+struct tetra_retune {
+    enum tetra_retune_reason reason;
+    uint32_t freq_hz;    /**< Downlink frequency to tune to. */
+    uint32_t ul_freq_hz; /**< Matching uplink frequency, 0 if unknown. */
+    uint16_t carrier;    /**< Carrier number. */
+    uint16_t call_id;    /**< TETRA_RETUNE_CALL: call to follow, else 0. */
+    uint32_t dst_ssi;    /**< TETRA_RETUNE_CALL: called party, 0 if unknown. */
+    uint8_t timeslots;   /**< TETRA_RETUNE_CALL: timeslots of the call. */
+    bool addressed;      /**< TETRA_RETUNE_CALL: call is for our identities. */
+};
+
+/**
+ * \brief Retune callback (TMO).
+ *
+ * Called from the receiving context when a call moves to another carrier
+ * of the cell (TETRA_RETUNE_CALL) and when the followed call ends or the
+ * receiver loses synchronisation away from the main carrier
+ * (TETRA_RETUNE_MAIN). The application decides: return true after tuning
+ * the radio to freq_hz, false to stay. Keep feeding samples across the
+ * retune: the carriers of a cell share the TDMA timing, so the receiver
+ * stays synchronised.
+ *
+ * @param user: opaque pointer from the configuration.
+ * @param r: request.
+ * @return true if the radio now receives freq_hz.
+ */
+typedef bool (*tetra_retune_cb)(void *user, const struct tetra_retune *r);
+
 /** Receiver configuration, common to TMO and DMO. */
 struct tetra_rx_config {
     tetra_event_cb cb;
@@ -345,6 +389,7 @@ struct tetra_rx_config {
     const uint32_t *groups; /**< Own group SSIs. */
     uint8_t ngroups;
     bool promiscuous; /**< Report everything, not only own calls. */
+    tetra_retune_cb retune; /**< Optional, TMO: tetra_retune_cb. */
 };
 
 /* ---- Internal state shared by the receivers. Treat as opaque. ---- */
@@ -395,6 +440,19 @@ struct tetra_lmac_ws {
  * @return frequency in Hz.
  */
 uint32_t tetra_carrier_hz(uint8_t band, uint16_t carrier, uint8_t offset);
+
+/**
+ * \brief Uplink frequency matching a downlink frequency
+ * (TS 100 392-15 table 2).
+ *
+ * @param dl_hz: downlink frequency in Hz.
+ * @param band: frequency band (as in tetra_cell.band).
+ * @param duplex_spacing: duplex spacing code (3 bits).
+ * @param reverse: reverse operation (uplink above downlink).
+ * @return uplink frequency in Hz, 0 if the spacing is reserved.
+ */
+uint32_t tetra_uplink_hz(uint32_t dl_hz, uint8_t band, uint8_t duplex_spacing,
+                         bool reverse);
 
 /**
  * \brief Map a traffic event onto the 690-word frame used by the ETSI

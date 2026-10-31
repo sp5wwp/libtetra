@@ -41,7 +41,7 @@ static void write_speech(const struct tetra_traffic *t)
 static const char *call_what[] = {
     "SETUP",        "CONNECT",     "TX-GRANTED", "TX-CEASED",  "LATE-ENTRY",
     "INFO",         "RELEASE",     "ALERT",      "PROCEEDING", "TX-WAIT",
-    "TX-INTERRUPT", "TX-CONTINUE", "RESTORE",
+    "TX-INTERRUPT", "TX-CONTINUE", "RESTORE",    "TX-DEMAND",
 };
 
 static const char *mm_what[] = {
@@ -56,7 +56,9 @@ static const char *chan_state[] = { "FREE", "OCCUPIED", "RESERVED",
 
 static void print_time(const struct tetra_event *ev)
 {
-    if (ev->mode == TETRA_MODE_TMO)
+    if (ev->uplink)
+        printf("[UL] ");
+    else if (ev->mode == TETRA_MODE_TMO)
         printf("[%02u/%02u/%u] ", ev->time.mn, ev->time.fn, ev->time.tn);
     else
         printf("[%02u/%u] ", ev->time.fn, ev->time.tn);
@@ -172,9 +174,10 @@ static void on_event(void *user, const struct tetra_event *ev)
 
         printf("CELL MCC %u MNC %u CC %u", c->mcc, c->mnc, c->colour_code);
         if (c->have_sysinfo)
-            printf(" LA %u DL %u Hz carrier %u HF %u services 0x%03x%s",
-                   c->location_area, c->dl_freq_hz, c->main_carrier,
-                   c->hyperframe, c->service_details,
+            printf(" LA %u DL %u Hz UL %u Hz carrier %u HF %u services "
+                   "0x%03x%s",
+                   c->location_area, c->dl_freq_hz, c->ul_freq_hz,
+                   c->main_carrier, c->hyperframe, c->service_details,
                    c->air_encryption ? " (air enc)" : "");
         printf("\n");
         break;
@@ -243,7 +246,8 @@ static void on_event(void *user, const struct tetra_event *ev)
         break;
     }
     case TETRA_EV_SIGNAL:
-        printf("SIGNAL TMO uplink, not decoded\n");
+        printf("SIGNAL TMO uplink%s\n",
+               TETRA_UPLINK_DECODE ? "" : ", not decoded");
         break;
     case TETRA_EV_PDU:
         printf("PDU proto %d type %u addr %u %u bits%s\n", ev->u.pdu.proto,
@@ -253,14 +257,28 @@ static void on_event(void *user, const struct tetra_event *ev)
     }
 }
 
+/* A recording cannot be retuned: print the request and decline. */
+static bool on_retune(void *user, const struct tetra_retune *r)
+{
+    (void)user;
+    printf("RETUNE %s carrier %u DL %u Hz UL %u Hz",
+           r->reason == TETRA_RETUNE_CALL ? "call" : "main", r->carrier,
+           r->freq_hz, r->ul_freq_hz);
+    if (r->reason == TETRA_RETUNE_CALL)
+        printf(" call %u dst %u ts 0x%x", r->call_id, r->dst_ssi, r->timeslots);
+    printf(" (not followed)\n");
+    return false;
+}
+
 static void usage(const char *p)
 {
     fprintf(stderr,
             "usage: %s [-m tmo|dmo] [-t dibit|bit|soft] [-w tch.out]\n"
-            "          [-s speech.ser] [-q] input\n"
+            "          [-s speech.ser] [-u mcc:mnc:cc] [-q] input\n"
             "  -w  write traffic frames in ETSI 690-word format\n"
             "  -s  write decoded speech frames in ETSI serial format\n"
             "      (BFI + 137 bits per frame, 16-bit words)\n"
+            "  -u  decode the TMO uplink of this cell\n"
             "  -q  do not print traffic events\n",
             p);
     exit(2);
@@ -274,11 +292,12 @@ int main(int argc, char **argv)
     struct tetra_rx_config cfg;
     enum in_fmt fmt = IN_DIBIT;
     int is_dmo = 0, opt;
+    unsigned ul_mcc = 0, ul_mnc = 0, ul_cc = 0, have_ul = 0;
     uint8_t buf[4096];
     size_t n;
     FILE *f;
 
-    while ((opt = getopt(argc, argv, "m:t:w:s:q")) != -1) {
+    while ((opt = getopt(argc, argv, "m:t:w:s:u:q")) != -1) {
         switch (opt) {
         case 'm':
             is_dmo = !strcmp(optarg, "dmo");
@@ -307,6 +326,12 @@ int main(int argc, char **argv)
                 return 1;
             }
             break;
+        case 'u':
+            if (sscanf(optarg, "%u:%u:%u", &ul_mcc, &ul_mnc, &ul_cc) != 3 ||
+                ul_mcc > 1023 || ul_mnc > 16383 || ul_cc > 63)
+                usage(argv[0]);
+            have_ul = 1;
+            break;
         case 'q':
             quiet_traffic = 1;
             break;
@@ -326,10 +351,20 @@ int main(int argc, char **argv)
     memset(&cfg, 0, sizeof(cfg));
     cfg.cb = on_event;
     cfg.promiscuous = true;
-    if (is_dmo)
+    cfg.retune = on_retune;
+    if (is_dmo) {
         tetra_dmo_init(&dmo, &cfg);
-    else
+    } else {
         tetra_tmo_init(&tmo, &cfg);
+#if TETRA_UPLINK_DECODE
+        if (have_ul)
+            tetra_tmo_set_uplink_cell(&tmo, (uint16_t)ul_mcc, (uint16_t)ul_mnc,
+                                      (uint8_t)ul_cc);
+#else
+        if (have_ul)
+            fprintf(stderr, "built without TETRA_UPLINK_DECODE\n");
+#endif
+    }
 
     while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
         if (is_dmo) {

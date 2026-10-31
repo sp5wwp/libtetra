@@ -17,6 +17,7 @@ enum lmac_chan {
     LMAC_SCH_S = 0, /* SCH/S, BSCH: 60 -> 120 bits, (120,11) */
     LMAC_SCH_H,     /* SCH/H, SCH/HD, BNCH, STCH: 124 -> 216, (216,101) */
     LMAC_SCH_F,     /* SCH/F: 268 -> 432, (432,103) */
+    LMAC_SCH_HU,    /* SCH/HU (uplink): 92 -> 168, (168,13) */
 };
 
 struct lmac_chan_def {
@@ -25,7 +26,7 @@ struct lmac_chan_def {
     uint16_t a;  /* interleaver parameter */
 };
 
-extern const struct lmac_chan_def lmac_chan_defs[3];
+extern const struct lmac_chan_def lmac_chan_defs[4];
 
 /**
  * Decode one signalling block.

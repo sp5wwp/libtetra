@@ -20,6 +20,8 @@ extern const uint8_t tetra_seq_p[22]; /* normal training sequence 2 */
 extern const uint8_t tetra_seq_y[38]; /* synchronisation training seq */
 extern const uint8_t tetra_seq_f[80]; /* frequency correction field */
 extern const uint8_t tetra_seq_q[22]; /* normal training sequence 3 */
+extern const uint8_t tetra_seq_x[30]; /* extended training sequence */
+extern const uint8_t tetra_tail[4];   /* uplink tail bits */
 extern const uint8_t tetra_dmo_p1[12];
 extern const uint8_t tetra_dmo_p2[12];
 extern const uint8_t tetra_dmo_p3[12];
@@ -41,6 +43,15 @@ extern const uint8_t tetra_dmo_p3[12];
 #define TMO_SB_TRAIN 214
 #define TMO_SB_BB 252
 #define TMO_SB_BLK2 282
+
+/*
+ * TMO uplink bursts (tables 9.1 and 9.2), relative to the end of their
+ * training sequence: the receiver aligns each burst on it, as bursts of
+ * different MSs arrive with different timing.
+ */
+#define TMO_CB_HALF 84   /* scrambled control bits either side of x */
+#define TMO_CB_TRAIN 30  /* x */
+#define TMO_NUB_TRAIN 22 /* n or p */
 
 /*
  * Bit offsets (0-based) inside a 510-bit DMO slot. The burst starts after

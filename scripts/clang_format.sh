@@ -33,6 +33,7 @@ FILES=(
     src/l2/lmac.h
     src/l2/speech.c
     src/l2/tmo_mac.c
+    src/l2/tmo_ul_mac.c
     src/l3/dmo_cc.c
     src/l3/lip.c
     src/l3/sds.c
@@ -46,6 +47,7 @@ FILES=(
     tests/unit/test_speech.cpp
     tests/unit/test_tmo.cpp
     tests/unit/test_tmo_l3.cpp
+    tests/unit/test_tmo_ul.cpp
     tools/dmo_scenario.c
     tools/dmo_scenario.h
     tools/tetra_demod.c

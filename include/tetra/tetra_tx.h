@@ -23,6 +23,7 @@ enum tetra_sch {
     TETRA_SCH_S = 0, /**< SCH/S (DMO), BSCH (TMO): 60 type-1 bits. */
     TETRA_SCH_H,     /**< SCH/H, SCH/HD, BNCH, STCH: 124 type-1 bits. */
     TETRA_SCH_F,     /**< SCH/F: 268 type-1 bits. */
+    TETRA_SCH_HU,    /**< SCH/HU (TMO uplink): 92 type-1 bits. */
 };
 
 /** DMO burst length (bits) excluding guard and ramping periods. */
@@ -35,9 +36,9 @@ enum tetra_sch {
  * scrambling).
  *
  * @param ch: channel class.
- * @param type1: type-1 bits (60, 124 or 268).
+ * @param type1: type-1 bits (60, 124, 268 or 92).
  * @param scramb: scrambler state from tetra_scramb_init().
- * @param type5: output type-5 bits (120, 216 or 432).
+ * @param type5: output type-5 bits (120, 216, 432 or 168).
  */
 void tetra_encode_sch(enum tetra_sch ch, const uint8_t *type1, uint32_t scramb,
                       uint8_t *type5);
@@ -95,6 +96,30 @@ void tetra_tmo_build_ndb(uint8_t slot[510], const uint8_t bkn1[216],
  */
 void tetra_tmo_build_sb(uint8_t slot[510], const uint8_t sb[120],
                         const uint8_t bb[30], const uint8_t bkn2[216]);
+
+/** TMO control uplink burst length in bits (table 9.1). */
+#define TETRA_CB_BITS 206
+/** TMO normal uplink burst length in bits (table 9.2). */
+#define TETRA_NUB_BITS 462
+
+/**
+ * \brief Build a TMO control uplink burst (table 9.1), without ramping.
+ *
+ * @param burst: 206 output bits.
+ * @param cb: 168 bits of SCH/HU.
+ */
+void tetra_tmo_build_cb(uint8_t burst[206], const uint8_t cb[168]);
+
+/**
+ * \brief Build a TMO normal uplink burst (table 9.2), without ramping.
+ *
+ * @param burst: 462 output bits.
+ * @param bkn1: 216 bits of block 1.
+ * @param bkn2: 216 bits of block 2.
+ * @param two_blocks: training sequence 2 (STCH in block 1).
+ */
+void tetra_tmo_build_nub(uint8_t burst[462], const uint8_t bkn1[216],
+                         const uint8_t bkn2[216], bool two_blocks);
 
 /**
  * \brief Channel encode two speech frames into a traffic slot
