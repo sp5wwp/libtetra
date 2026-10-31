@@ -689,6 +689,20 @@ void tmo_traffic(struct tetra_tmo_rx *rx, uint8_t um, enum tetra_half h1,
         t->talker_ssi = c->talker_ssi;
         t->circuit_type = c->circuit_type;
         t->encrypted = c->encrypted;
+        if (c->encrypted) {
+            struct tetra_tmo_key_request request = {
+                &rx->cell, c->dst_ssi, um, true
+            };
+            enum tetra_tea_algorithm algorithm;
+            uint8_t eck[TETRA_TEA_KEY_BYTES];
+
+            if (tmo_crypto_get_eck(rx, &request, &algorithm, eck) &&
+                tmo_crypto_keystream_bits(rx, algorithm, eck, 0,
+                                          sizeof(rx->traffic_keystream),
+                                          rx->traffic_keystream))
+                t->cipher_keystream = rx->traffic_keystream;
+            memset(eck, 0, sizeof(eck));
+        }
         if (!rx->cfg.promiscuous && !tmo_addressed(rx, c->dst_ssi))
             return;
     } else if (!rx->cfg.promiscuous) {

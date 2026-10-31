@@ -252,25 +252,56 @@ void tetra_speech_encode_half(const uint8_t *a, uint8_t *type4)
     tetra_interleave(t3, type4, 216, 101);
 }
 
-bool tetra_speech_decode_slot(struct tetra_speech_ws *ws, const int8_t *type4,
-                              uint8_t *a, uint8_t *b)
+static void speech_apply_cipher(const struct layout *l, uint8_t *t2,
+                                unsigned frame, const uint8_t *keystream)
+{
+    if (!keystream)
+        return;
+    for (unsigned i = 0; i < TETRA_SPEECH_BITS; i++) {
+        unsigned pos = t2_pos(l, frame, speech_order[i] - 1);
+        t2[pos] ^= keystream[i] & 1u;
+    }
+}
+
+static bool speech_decode_slot_cipher(struct tetra_speech_ws *ws,
+                                      const int8_t *type4, uint8_t *a,
+                                      uint8_t *b,
+                                      const uint8_t *keystream)
 {
     for (unsigned i = 0; i < 18; i++) {
         for (unsigned j = 0; j < 24; j++)
             ws->t3[j * 18 + i] = type4[i * 24 + j];
     }
     decode_t3(&full, ws);
+    if (keystream) {
+        speech_apply_cipher(&full, ws->t2, 0, keystream);
+        speech_apply_cipher(&full, ws->t2, 1, keystream + TETRA_SPEECH_BITS);
+    }
     t2_to_frames(&full, ws->t2, a, b);
     return check_parity(&full, ws->t2);
+}
+
+static bool speech_decode_half_cipher(struct tetra_speech_ws *ws,
+                                      const int8_t *type4, uint8_t *a,
+                                      const uint8_t *keystream)
+{
+    tetra_deinterleave_soft(type4, ws->t3, 216, 101);
+    decode_t3(&half, ws);
+    speech_apply_cipher(&half, ws->t2, 0, keystream);
+    t2_to_frames(&half, ws->t2, a, NULL);
+    return check_parity(&half, ws->t2);
+}
+
+bool tetra_speech_decode_slot(struct tetra_speech_ws *ws, const int8_t *type4,
+                              uint8_t *a, uint8_t *b)
+{
+    return speech_decode_slot_cipher(ws, type4, a, b, NULL);
 }
 
 bool tetra_speech_decode_half(struct tetra_speech_ws *ws, const int8_t *type4,
                               uint8_t *a)
 {
-    tetra_deinterleave_soft(type4, ws->t3, 216, 101);
-    decode_t3(&half, ws);
-    t2_to_frames(&half, ws->t2, a, NULL);
-    return check_parity(&half, ws->t2);
+    return speech_decode_half_cipher(ws, type4, a, NULL);
 }
 
 int tetra_speech_decode(struct tetra_speech_ws *ws,
@@ -285,14 +316,17 @@ int tetra_speech_decode(struct tetra_speech_ws *ws,
         return 0;
 
     if (t->half[0] == TETRA_HALF_TCH) {
-        ok = tetra_speech_decode_slot(ws, t->bits, out->bits[0], out->bits[1]);
+        ok = speech_decode_slot_cipher(ws, t->bits, out->bits[0],
+                                       out->bits[1], t->cipher_keystream);
         out->bfi[0] = !ok;
         out->bfi[1] = !ok;
         return ok ? 2 : 0;
     }
 
-    /* First half stolen: only the second frame is speech. */
-    ok = tetra_speech_decode_half(ws, t->bits + 216, out->bits[1]);
+    /* First half stolen: the second speech frame uses keystream bits 137..273. */
+    ok = speech_decode_half_cipher(
+        ws, t->bits + 216, out->bits[1],
+        t->cipher_keystream ? t->cipher_keystream + TETRA_SPEECH_BITS : NULL);
     out->bfi[1] = !ok;
     return ok ? 1 : 0;
 }

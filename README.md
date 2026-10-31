@@ -18,9 +18,10 @@ TETRA library focused on 32-bit MCUs.
 - TX building blocks (channel encoding, burst assembly) for later use.
 - TEA1/TEA2/TEA3 byte-oriented keystream generation and TMO IV construction.
 
-The TEA APIs expose keystream generation only; the receiver does not yet
-manage keys, derive ECK with TB5, or automatically decrypt received PDUs.
-Also not supported: TMO uplink, D8PSK/QAM, DM-REP/DM-GATE operation.
+The TEA API exposes keystream generation, TB5 derivation and a TMO receiver
+key-provider interface. TMO signalling and speech can be decrypted when the
+application provides the correct provisioned key. Also not supported: TMO
+uplink, D8PSK/QAM, DM-REP/DM-GATE operation.
 Circuit mode data is delivered undecoded.
 
 ## TEA keystream generation
@@ -28,8 +29,9 @@ Circuit mode data is delivered undecoded.
 The `tetra_crypto.h` API generates TEA1, TEA2, or TEA3 keystream bytes from
 an 80-bit ECK and a 29-bit IV. `tetra_tea_build_iv()` assembles the TMO IV
 from the slot, frame, multiframe, hyperframe extension, and link direction.
-The caller remains responsible for key management and any required TB5 key
-derivation; consume generated bits most-significant-bit first.
+The caller remains responsible for key management when using the primitive
+API directly. Consume generated bits most-significant-bit first. For receiver
+integration, see the TMO air-interface decryption section below.
 
 ```c
 #include <tetra/tetra.h>
@@ -47,10 +49,48 @@ if (tetra_tea_build_iv(&time, hyperframe, TETRA_TEA_DOWNLINK, &iv) &&
 
 The TEA1/2/3 source files are adapted from Osmocom `osmo-tetra` and retain
 their original AGPL-3.0-or-later licensing and copyright attribution. The
-AGPL text is included as `LICENSE-AGPL-3.0`; other libtetra files retain their
+AGPL text is included as `LICENSE-AGPL-3.0`, other libtetra files retain their
 GPL-3.0-or-later licensing. ETSI EN 300 392-7 states that the TETRA standard
-algorithms are available on a restricted basis; users must comply with the
+algorithms are available on a restricted basis. Users must comply with the
 applicable ETSI TS 101 053 terms and undertakings.
+
+## TMO air-interface decryption
+
+TMO TEA1/TEA2/TEA3 decryption is enabled by supplying a base-key provider.
+The callback selects the applicable provisioned 80-bit CK for the current
+cell (normally the CCK or SCK) and returns the network key-stream generator.
+libtetra applies TB5 using the SYSINFO main carrier, location area and colour
+code, then uses the cell hyperframe and current TDMA position to construct the
+cipher IV. The application remains responsible for securely storing keys and
+selecting the correct key for the cell and traffic context.
+
+```c
+static bool get_tmo_key(void *user,
+                        const struct tetra_tmo_key_request *request,
+                        enum tetra_tea_algorithm *algorithm,
+                        uint8_t ck[TETRA_TEA_KEY_BYTES])
+{
+    struct my_keystore *store = user;
+
+    /* Select by cell/network metadata. request->address may be ciphered. */
+    return my_keystore_lookup(store, request, algorithm, ck);
+}
+
+/* After tetra_tmo_init(): */
+tetra_tmo_set_key_provider(&rx, get_tmo_key, &keystore);
+```
+
+The callback must return CK, not an already TB5-derived ECK. The MAC address
+in the request is the on-air value and may itself be encrypted, so a provider
+must not assume it is a plaintext SSI/GSSI. CCK ID is exposed when present,
+but is not required for SCK-based selection. The traffic
+speech decoder consumes the keystream supplied with `TETRA_EV_TRAFFIC` and
+removes encryption before validating the speech-frame parity. MAC signalling
+is decrypted before LLC/L3 parsing. If the provider has no key, the receiver
+continues reporting the encrypted PDU/traffic state without attempting to
+parse ciphertext. The provider is responsible for the relevant CCK/SCK key
+selection. Individual DCK/GCK derivation and key-file parsing are not
+implemented by this interface.
 
 ## Usage
 

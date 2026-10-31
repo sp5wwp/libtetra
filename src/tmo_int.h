@@ -52,7 +52,24 @@ struct tmo_macinfo {
 /* Upper MAC (src/l2/tmo_mac.c) */
 void tmo_mac_sync(struct tetra_tmo_rx *rx, const uint8_t *blk);
 int tmo_mac_block(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
-                  const uint8_t *blk, unsigned nbits);
+                  const uint8_t *blk, unsigned nbits,
+                  unsigned cipher_offset_bits);
+
+/* TMO air-interface cryptography (src/tmo_crypto.c). */
+bool tmo_crypto_get_eck(struct tetra_tmo_rx *rx,
+                        const struct tetra_tmo_key_request *request,
+                        enum tetra_tea_algorithm *algorithm,
+                        uint8_t eck[TETRA_TEA_KEY_BYTES]);
+bool tmo_crypto_keystream_bits(struct tetra_tmo_rx *rx,
+                               enum tetra_tea_algorithm algorithm,
+                               const uint8_t eck[TETRA_TEA_KEY_BYTES],
+                               unsigned bit_offset, unsigned nbits,
+                               uint8_t *output);
+bool tmo_crypto_xor_bits(struct tetra_tmo_rx *rx,
+                         enum tetra_tea_algorithm algorithm,
+                         const uint8_t eck[TETRA_TEA_KEY_BYTES],
+                         uint8_t *buf, unsigned start, unsigned nbits,
+                         unsigned bit_offset);
 
 /* LLC, MLE and layer 3 (src/l3/tmo_l3.c) */
 void tmo_llc(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,

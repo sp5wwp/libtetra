@@ -23,6 +23,8 @@ add_library(tetra STATIC
     src/crypto/tea1.c
     src/crypto/tea2.c
     src/crypto/tea3.c
+    src/crypto/tb5.c
+    src/tmo_crypto.c
     src/dmo_rx.c
     src/l1/burst.c
     src/l1/l1.c

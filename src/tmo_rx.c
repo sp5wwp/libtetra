@@ -58,6 +58,19 @@ void tetra_tmo_set_slots(struct tetra_tmo_rx *rx, uint8_t mask)
     rx->slots = mask & TETRA_TS_ALL;
 }
 
+void tetra_tmo_set_key_provider(struct tetra_tmo_rx *rx,
+                                tetra_tmo_key_provider provider, void *user)
+{
+    if (!rx)
+        return;
+    rx->key_provider = provider;
+    rx->key_provider_user = user;
+    for (unsigned i = 0; i < 4; i++) {
+        rx->frag[i].active = false;
+        memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
+    }
+}
+
 const struct tetra_cell *tetra_tmo_cell(const struct tetra_tmo_rx *rx)
 {
     return rx->locked ? &rx->cell : NULL;
@@ -80,8 +93,10 @@ static void set_lock(struct tetra_tmo_rx *rx, bool locked)
 #endif
     if (!locked) {
         memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
-        for (unsigned i = 0; i < 4; i++)
+        for (unsigned i = 0; i < 4; i++) {
             rx->frag[i].active = false;
+            memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
+        }
     }
     memset(&ev, 0, sizeof(ev));
     ev.type = TETRA_EV_SYNC;
@@ -173,7 +188,7 @@ static void process_stolen(struct tetra_tmo_rx *rx, uint32_t s, uint8_t um)
         /* MAC-U-SIGNAL starts with PDU type 11 */
         if ((rx->blk[0][0] >> 6) == 3)
             h1 = TETRA_HALF_STOLEN_U;
-        fl = tmo_mac_block(rx, TMO_STCH, rx->blk[0], 124);
+        fl = tmo_mac_block(rx, TMO_STCH, rx->blk[0], 124, 0);
     }
 
     /* If block 1 failed, try block 2 as STCH before assuming TCH. */
@@ -184,7 +199,7 @@ static void process_stolen(struct tetra_tmo_rx *rx, uint32_t s, uint8_t um)
     if (ok2) {
         h2 = (rx->blk[1][0] >> 6) == 3 ? TETRA_HALF_STOLEN_U
                                        : TETRA_HALF_STOLEN_C;
-        tmo_mac_block(rx, TMO_STCH, rx->blk[1], 124);
+        tmo_mac_block(rx, TMO_STCH, rx->blk[1], 124, 216);
     }
 
     /* Hand the slot to the codec when any half holds traffic. */
@@ -206,6 +221,8 @@ static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
     if (!(rx->slots & (1u << (rx->t.tn - 1)))) {
         rx->dl_um[rx->t.tn - 1] = 0xff;
         rx->frag[rx->t.tn - 1].active = false;
+        memset(rx->frag[rx->t.tn - 1].eck, 0,
+               sizeof(rx->frag[rx->t.tn - 1].eck));
         if (sb)
             decode_bsch(rx, s);
         return;
@@ -218,7 +235,7 @@ static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
     if (sb) {
         decode_bsch(rx, s);
         if (decode_half(rx, s + TMO_SB_BLK2, rx->blk[1]))
-            tmo_mac_block(rx, TMO_SCH_HD, rx->blk[1], 124);
+            tmo_mac_block(rx, TMO_SCH_HD, rx->blk[1], 124, 216);
         return;
     }
 
@@ -232,7 +249,7 @@ static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
         rxcore_copy(&rx->core, s + TMO_NDB_BLK1, b, 216);
         rxcore_copy(&rx->core, s + TMO_NDB_BLK2, b + 216, 216);
         if (lmac_decode(&rx->ws, LMAC_SCH_F, b, rx->scramb, rx->blk[0]))
-            tmo_mac_block(rx, TMO_SCH_F, rx->blk[0], 268);
+            tmo_mac_block(rx, TMO_SCH_F, rx->blk[0], 268, 0);
         return;
     }
 
@@ -241,9 +258,9 @@ static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
         return;
     }
     if (decode_half(rx, s + TMO_NDB_BLK1, rx->blk[0]))
-        tmo_mac_block(rx, TMO_SCH_HD, rx->blk[0], 124);
+        tmo_mac_block(rx, TMO_SCH_HD, rx->blk[0], 124, 0);
     if (decode_half(rx, s + TMO_NDB_BLK2, rx->blk[1]))
-        tmo_mac_block(rx, TMO_SCH_HD, rx->blk[1], 124);
+        tmo_mac_block(rx, TMO_SCH_HD, rx->blk[1], 124, 216);
 }
 
 /* Find the burst type and fine timing of the slot at rx->slot_start. */

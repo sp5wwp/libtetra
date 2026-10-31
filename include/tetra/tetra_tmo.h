@@ -9,8 +9,10 @@
  * Feed it the demodulated bit stream of one carrier; it acquires the
  * synchronisation burst, follows the TDMA structure and reports cell
  * information, call control, short data and traffic through the event
- * callback. Air interface encryption is not supported: encrypted PDUs are
- * reported as such and not parsed.
+ * callback. Air-interface encryption can be decoded when an application
+ * installs a key-provider callback with tetra_tmo_set_key_provider().
+ * Encrypted data remains reported as encrypted when no matching key is
+ * available.
  *
  * While not synchronised, the receiver recognises TMO uplink transmissions
  * and reports them once with TETRA_EV_SIGNAL (TETRA_UPLINK_DETECT).
@@ -19,6 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <tetra/tetra_common.h>
+#include <tetra/tetra_crypto.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,6 +36,9 @@ struct tetra_tmo_frag {
     uint8_t usage_marker;
     uint32_t addr;
     uint16_t nbits;
+    bool crypto_valid;
+    enum tetra_tea_algorithm algorithm;
+    uint8_t eck[TETRA_TEA_KEY_BYTES];
     uint8_t buf[(TETRA_TMO_MAX_SDU_BITS + 7) / 8];
 };
 
@@ -62,6 +68,30 @@ struct tetra_tmo_uldet {
     uint32_t last_dl; /* bit count at the last downlink evidence */
 };
 
+/** Context passed to the application key provider. */
+struct tetra_tmo_key_request {
+    const struct tetra_cell *cell;
+    uint32_t address;      /**< SSI/GSSI as received; may be ciphered, or 0. */
+    uint8_t usage_marker;  /**< TMO usage marker, or 0 when unavailable. */
+    bool traffic;          /**< True for traffic-channel decryption. */
+};
+
+/**
+ * Application-supplied TETRA base-key selector.
+ *
+ * The callback selects a provisioned 80-bit CK (typically the applicable
+ * CCK/SCK) for the current cell and request, and returns the network KSG.
+ * TB5 is then applied by libtetra. Return false when no matching key exists.
+ * The request address is the on-air value and may itself be encrypted; key
+ * selection must not assume that it is a plaintext SSI/GSSI. The CCK ID is
+ * optional for key providers that select an SCK or other cell-level key.
+ * The key is copied by the receiver and may be overwritten after return.
+ */
+typedef bool (*tetra_tmo_key_provider)(
+    void *user, const struct tetra_tmo_key_request *request,
+    enum tetra_tea_algorithm *algorithm,
+    uint8_t ck[TETRA_TEA_KEY_BYTES]);
+
 struct tetra_tmo_rx {
     struct tetra_rx_config cfg;
     struct tetra_rxcore core;
@@ -80,6 +110,9 @@ struct tetra_tmo_rx {
     uint8_t dl_um[4];
     uint8_t blk[2][34];
     int8_t tch[TETRA_TCH_BITS];
+    uint8_t traffic_keystream[274];
+    tetra_tmo_key_provider key_provider;
+    void *key_provider_user;
     struct tetra_tmo_frag frag[4];
     struct tetra_tmo_call_state calls[TETRA_TMO_MAX_CALLS];
 #if TETRA_UPLINK_DETECT
@@ -94,6 +127,14 @@ struct tetra_tmo_rx {
  * @param cfg: configuration (copied).
  */
 void tetra_tmo_init(struct tetra_tmo_rx *rx, const struct tetra_rx_config *cfg);
+
+/**
+ * Configure the callback used to select provisioned base keys for TMO
+ * decryption. Pass NULL to disable decryption. The callback may be changed
+ * from an event callback; changes apply to subsequently processed blocks.
+ */
+void tetra_tmo_set_key_provider(struct tetra_tmo_rx *rx,
+                                tetra_tmo_key_provider provider, void *user);
 
 /**
  * \brief Feed demodulated symbols as dibits.

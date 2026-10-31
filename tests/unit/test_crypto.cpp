@@ -35,6 +35,24 @@ TEST_CASE("TEA1/2/3 keystreams match Osmocom reference outputs", "[crypto][tea][
     }
 }
 
+
+TEST_CASE("TB5 derives the 80-bit ECK from network parameters", "[crypto][tb5]")
+{
+    const std::array<uint8_t, TETRA_TEA_KEY_BYTES> ck = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+    };
+    const std::array<uint8_t, TETRA_TEA_KEY_BYTES> expected = {
+        0x48, 0xd3, 0xad, 0x2e, 0xaf, 0xce, 0x6c, 0xf5, 0xd2, 0xb5,
+    };
+    std::array<uint8_t, TETRA_TEA_KEY_BYTES> eck{};
+
+    REQUIRE(tetra_tb5(0xabc, 0x1234, 0x2d, ck.data(), eck.data()));
+    REQUIRE(eck == expected);
+    REQUIRE_FALSE(tetra_tb5(0x1000, 0, 0, ck.data(), eck.data()));
+    REQUIRE_FALSE(tetra_tb5(0, 0x4000, 0, ck.data(), eck.data()));
+    REQUIRE_FALSE(tetra_tb5(0, 0, 0x40, ck.data(), eck.data()));
+}
+
 TEST_CASE("TEA IV changes the generated keystream", "[crypto][tea][iv][oracle]")
 {
     const std::array<uint8_t, TETRA_TEA_KEY_BYTES> key = {

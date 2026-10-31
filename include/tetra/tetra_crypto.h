@@ -15,6 +15,21 @@ extern "C" {
 /** TEA key size, in bytes (80 bits). */
 #define TETRA_TEA_KEY_BYTES 10
 
+/**
+ * Derive the 80-bit encryption key (ECK) from a 80-bit base key (CK)
+ * using TB5 and the serving cell network parameters.
+ *
+ * @param cn 12-bit main carrier number.
+ * @param la 14-bit location area.
+ * @param cc 6-bit colour code.
+ * @param ck 80-bit provisioned base key, in network byte order.
+ * @param eck receives the derived 80-bit key.
+ * @return true on success; false for invalid fields or pointers.
+ */
+bool tetra_tb5(uint16_t cn, uint16_t la, uint8_t cc,
+               const uint8_t ck[TETRA_TEA_KEY_BYTES],
+               uint8_t eck[TETRA_TEA_KEY_BYTES]);
+
 /** TETRA air-interface keystream generators. */
 enum tetra_tea_algorithm {
     TETRA_TEA1 = 1,

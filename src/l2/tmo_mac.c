@@ -57,6 +57,14 @@ void tmo_mac_sync(struct tetra_tmo_rx *rx, const uint8_t *blk)
         c->system_code = syscode;
         c->sharing_mode = share;
         c->have_sysinfo = false;
+        c->have_hyperframe = false;
+        c->have_cck_id = false;
+        c->hyperframe = 0;
+        c->cck_id = 0;
+        for (unsigned i = 0; i < 4; i++) {
+            rx->frag[i].active = false;
+            memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
+        }
         emit_cell(rx);
     }
 }
@@ -90,17 +98,27 @@ static void parse_sysinfo(struct tetra_tmo_rx *rx, struct bitrd *b)
      * they are updated but do not trigger an event on their own. */
     n.hyperframe = rx->cell.hyperframe;
     n.cck_id = rx->cell.cck_id;
+    n.have_hyperframe = rx->cell.have_hyperframe;
+    n.have_cck_id = rx->cell.have_cck_id;
     if (memcmp(&n, &rx->cell, sizeof(n))) {
         rx->cell = n;
-        rx->cell.hyperframe = is_cck ? rx->cell.hyperframe : hf;
-        rx->cell.cck_id = is_cck ? hf : rx->cell.cck_id;
+        if (is_cck) {
+            rx->cell.cck_id = hf;
+            rx->cell.have_cck_id = true;
+        } else {
+            rx->cell.hyperframe = hf;
+            rx->cell.have_hyperframe = true;
+        }
         emit_cell(rx);
         return;
     }
-    if (is_cck)
+    if (is_cck) {
         rx->cell.cck_id = hf;
-    else
+        rx->cell.have_cck_id = true;
+    } else {
         rx->cell.hyperframe = hf;
+        rx->cell.have_hyperframe = true;
+    }
 }
 
 /* Channel allocation element, table 21.87. Returns false to discard. */
@@ -154,11 +172,21 @@ static unsigned li_bits(unsigned li)
     return 0;
 }
 
+static void key_request_from_mac(const struct tmo_macinfo *mi,
+                                 struct tetra_tmo_key_request *request)
+{
+    request->address = mi->ssi;
+    request->usage_marker = mi->usage_marker;
+    request->traffic = false;
+}
+
 static void frag_start(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
-                       const uint8_t *blk, unsigned s, unsigned e)
+                       const uint8_t *blk, unsigned s, unsigned e,
+                       unsigned cipher_offset_bits)
 {
     struct tetra_tmo_frag *f = &rx->frag[mi->tn - 1];
 
+    memset(f, 0, sizeof(*f));
     f->active = true;
     f->enc = mi->enc;
     f->addr_type = mi->addr_type;
@@ -171,10 +199,87 @@ static void frag_start(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
     }
     bits_copy(f->buf, 0, blk, s, e - s);
     f->nbits = (uint16_t)(e - s);
+
+    f->crypto_valid = !f->enc;
+    if (f->enc) {
+        struct tetra_tmo_key_request request;
+
+        key_request_from_mac(mi, &request);
+        request.cell = &rx->cell;
+        if (tmo_crypto_get_eck(rx, &request, &f->algorithm, f->eck) &&
+            tmo_crypto_xor_bits(rx, f->algorithm, f->eck, f->buf, 0,
+                                f->nbits, cipher_offset_bits))
+            f->crypto_valid = true;
+        else
+            memset(f->eck, 0, sizeof(f->eck));
+    }
 }
 
-static bool frag_append(struct tetra_tmo_rx *rx, uint8_t tn, const uint8_t *blk,
-                        unsigned s, unsigned e)
+static bool frag_append(struct tetra_tmo_rx *rx, uint8_t tn,
+                        const uint8_t *blk, unsigned s, unsigned e,
+                        unsigned cipher_offset_bits)
+{
+    struct tetra_tmo_frag *f = &rx->frag[tn - 1];
+    unsigned old_nbits;
+
+    if (!f->active)
+        return false;
+    if (f->nbits + (e - s) > TETRA_TMO_MAX_SDU_BITS) {
+        f->active = false;
+        memset(f->eck, 0, sizeof(f->eck));
+        return false;
+    }
+    old_nbits = f->nbits;
+    bits_copy(f->buf, old_nbits, blk, s, e - s);
+    f->nbits = (uint16_t)(f->nbits + (e - s));
+    if (f->enc && f->crypto_valid &&
+        !tmo_crypto_xor_bits(rx, f->algorithm, f->eck, f->buf, old_nbits,
+                             e - s, cipher_offset_bits)) {
+        f->active = false;
+        memset(f->eck, 0, sizeof(f->eck));
+        return false;
+    }
+    return true;
+}
+
+static void emit_encrypted_llc(struct tetra_tmo_rx *rx,
+                               const struct tmo_macinfo *mi)
+{
+    struct tetra_event ev;
+
+    memset(&ev, 0, sizeof(ev));
+    ev.type = TETRA_EV_PDU;
+    ev.u.pdu.proto = TETRA_PROTO_LLC;
+    ev.u.pdu.addr = mi->ssi;
+    ev.u.pdu.encrypted = true;
+    tmo_emit(rx, &ev);
+}
+
+static void frag_start_plain(struct tetra_tmo_rx *rx,
+                             const struct tmo_macinfo *mi,
+                             const uint8_t *buf, unsigned s, unsigned e,
+                             enum tetra_tea_algorithm algorithm,
+                             const uint8_t eck[TETRA_TEA_KEY_BYTES])
+{
+    struct tetra_tmo_frag *f = &rx->frag[mi->tn - 1];
+
+    memset(f, 0, sizeof(*f));
+    if (e - s > TETRA_TMO_MAX_SDU_BITS)
+        return;
+    f->active = true;
+    f->enc = mi->enc;
+    f->addr_type = mi->addr_type;
+    f->addr = mi->ssi;
+    f->usage_marker = mi->usage_marker;
+    f->crypto_valid = true;
+    f->algorithm = algorithm;
+    memcpy(f->eck, eck, sizeof(f->eck));
+    f->nbits = (uint16_t)(e - s);
+    bits_copy(f->buf, 0, buf, s, e - s);
+}
+
+static bool frag_append_plain(struct tetra_tmo_rx *rx, uint8_t tn,
+                              const uint8_t *buf, unsigned s, unsigned e)
 {
     struct tetra_tmo_frag *f = &rx->frag[tn - 1];
 
@@ -182,27 +287,45 @@ static bool frag_append(struct tetra_tmo_rx *rx, uint8_t tn, const uint8_t *blk,
         return false;
     if (f->nbits + (e - s) > TETRA_TMO_MAX_SDU_BITS) {
         f->active = false;
+        memset(f->eck, 0, sizeof(f->eck));
         return false;
     }
-    bits_copy(f->buf, f->nbits, blk, s, e - s);
+    bits_copy(f->buf, f->nbits, buf, s, e - s);
     f->nbits = (uint16_t)(f->nbits + (e - s));
     return true;
 }
 
 static void deliver(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
-                    const uint8_t *buf, unsigned s, unsigned e)
+                    const uint8_t *buf, unsigned s, unsigned e,
+                    unsigned cipher_offset_bits)
 {
     if (e <= s)
         return;
     if (mi->enc) {
-        struct tetra_event ev;
+        struct tetra_tmo_key_request request;
+        enum tetra_tea_algorithm algorithm;
+        uint8_t eck[TETRA_TEA_KEY_BYTES];
+        uint8_t tmp[(TETRA_TMO_MAX_SDU_BITS + 7) / 8] = { 0 };
+        struct tmo_macinfo plain = *mi;
+        unsigned nbits = e - s;
 
-        memset(&ev, 0, sizeof(ev));
-        ev.type = TETRA_EV_PDU;
-        ev.u.pdu.proto = TETRA_PROTO_LLC;
-        ev.u.pdu.addr = mi->ssi;
-        ev.u.pdu.encrypted = true;
-        tmo_emit(rx, &ev);
+        if (nbits > TETRA_TMO_MAX_SDU_BITS) {
+            emit_encrypted_llc(rx, mi);
+            return;
+        }
+        bits_copy(tmp, 0, buf, s, nbits);
+        key_request_from_mac(mi, &request);
+        request.cell = &rx->cell;
+        if (tmo_crypto_get_eck(rx, &request, &algorithm, eck) &&
+            tmo_crypto_xor_bits(rx, algorithm, eck, tmp, 0, nbits,
+                                cipher_offset_bits)) {
+            memset(eck, 0, sizeof(eck));
+            plain.enc = 0;
+            tmo_llc(rx, &plain, tmp, 0, nbits);
+            return;
+        }
+        memset(eck, 0, sizeof(eck));
+        emit_encrypted_llc(rx, mi);
         return;
     }
     tmo_llc(rx, mi, buf, s, e);
@@ -211,11 +334,14 @@ static void deliver(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,
 /* MAC-RESOURCE, table 21.55. Returns the end of the PDU or 0 to stop. */
 static unsigned mac_resource(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
                              const uint8_t *blk, unsigned start,
-                             unsigned blk_end, int *flags)
+                             unsigned blk_end, int *flags,
+                             unsigned cipher_offset_bits)
 {
     struct bitrd b;
     struct tmo_macinfo mi;
     unsigned fill, li, pdu_end, sdu_end;
+    unsigned ca_start = 0;
+    bool ca_present;
 
     memset(&mi, 0, sizeof(mi));
     mi.tn = rx->t.tn;
@@ -255,10 +381,13 @@ static unsigned mac_resource(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
         br_skip(&b, 4); /* power control */
     if (br_get(&b, 1))
         br_skip(&b, 8); /* basic slot granting */
-    if (br_get(&b, 1)) {
-        if (!parse_chan_alloc(&b, &mi.ca))
-            return 0;
+    ca_present = br_get(&b, 1);
+    if (ca_present) {
         mi.has_ca = true;
+        ca_start = b.pos;
+        /* The channel-allocation element is itself ciphered when ENC != 0. */
+        if (!mi.enc && !parse_chan_alloc(&b, &mi.ca))
+            return 0;
     }
     if (b.err)
         return 0;
@@ -277,8 +406,58 @@ static unsigned mac_resource(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
         return 0;
 
     sdu_end = fill ? bits_strip_fill(blk, b.pos, pdu_end) : pdu_end;
+
+    if (mi.enc && ca_present) {
+        struct tetra_tmo_key_request request;
+        enum tetra_tea_algorithm algorithm;
+        uint8_t eck[TETRA_TEA_KEY_BYTES];
+        uint8_t tmp[(TETRA_TMO_MAX_SDU_BITS + 7) / 8] = { 0 };
+        unsigned cipher_start = ca_start;
+        unsigned nbits = sdu_end - cipher_start;
+        struct bitrd ca;
+        bool decrypted = false;
+
+        if (nbits <= TETRA_TMO_MAX_SDU_BITS) {
+            bits_copy(tmp, 0, blk, cipher_start, nbits);
+            key_request_from_mac(&mi, &request);
+            request.cell = &rx->cell;
+            decrypted = tmo_crypto_get_eck(rx, &request, &algorithm, eck) &&
+                        tmo_crypto_xor_bits(rx, algorithm, eck, tmp, 0,
+                                            nbits, cipher_offset_bits);
+        }
+        if (!decrypted) {
+            memset(eck, 0, sizeof(eck));
+            if (li == LI_FRAG_START)
+                rx->frag[mi.tn - 1].active = false;
+            emit_encrypted_llc(rx, &mi);
+            return li == LI_HALF2_STOLEN ? 0 : pdu_end;
+        }
+
+        br_init(&ca, tmp, 0, nbits);
+        if (!parse_chan_alloc(&ca, &mi.ca) || ca.err) {
+            memset(eck, 0, sizeof(eck));
+            return 0;
+        }
+        mi.has_ca = true;
+        if (li == LI_FRAG_START) {
+            frag_start_plain(rx, &mi, tmp, ca.pos, nbits, algorithm, eck);
+            memset(eck, 0, sizeof(eck));
+            return 0;
+        }
+        if (ca.pos == nbits) {
+            if (mi.has_ca || mi.usage_marker)
+                tmo_llc(rx, &mi, tmp, nbits, nbits);
+        } else {
+            struct tmo_macinfo plain = mi;
+            plain.enc = 0;
+            tmo_llc(rx, &plain, tmp, ca.pos, nbits);
+        }
+        memset(eck, 0, sizeof(eck));
+        return li == LI_HALF2_STOLEN ? 0 : pdu_end;
+    }
+
     if (li == LI_FRAG_START) {
-        frag_start(rx, &mi, blk, b.pos, sdu_end);
+        frag_start(rx, &mi, blk, b.pos, sdu_end, cipher_offset_bits);
         return 0;
     }
     if (b.pos == sdu_end) {
@@ -286,28 +465,31 @@ static unsigned mac_resource(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
         if (mi.has_ca || mi.usage_marker)
             tmo_llc(rx, &mi, blk, b.pos, b.pos);
     } else {
-        deliver(rx, &mi, blk, b.pos, sdu_end);
+        deliver(rx, &mi, blk, b.pos, sdu_end, cipher_offset_bits);
     }
     return li == LI_HALF2_STOLEN ? 0 : pdu_end;
 }
 
 /* MAC-FRAG / MAC-END, tables 21.57 and 21.59. */
 static unsigned mac_frag_end(struct tetra_tmo_rx *rx, const uint8_t *blk,
-                             unsigned start, unsigned blk_end)
+                             unsigned start, unsigned blk_end,
+                             unsigned cipher_offset_bits)
 {
     struct bitrd b;
     struct tetra_tmo_frag *f = &rx->frag[rx->t.tn - 1];
     struct tmo_macinfo mi;
     unsigned sub, fill, li, pdu_end, sdu_end;
+    bool ca_present;
+    unsigned ca_start = 0;
 
     br_init(&b, blk, start + 2, blk_end);
     sub = br_get(&b, 1);
     fill = br_get(&b, 1);
 
     if (!sub) {
-        /* MAC-FRAG: the rest of the block */
+        /* MAC-FRAG: the rest of the block; ciphering starts at this segment. */
         sdu_end = fill ? bits_strip_fill(blk, b.pos, blk_end) : blk_end;
-        frag_append(rx, rx->t.tn, blk, b.pos, sdu_end);
+        frag_append(rx, rx->t.tn, blk, b.pos, sdu_end, cipher_offset_bits);
         return 0;
     }
 
@@ -316,12 +498,15 @@ static unsigned mac_frag_end(struct tetra_tmo_rx *rx, const uint8_t *blk,
     li = br_get(&b, 6);
     if (br_get(&b, 1))
         br_skip(&b, 8);
-    if (br_get(&b, 1)) {
-        if (!parse_chan_alloc(&b, &mi.ca)) {
+    ca_present = br_get(&b, 1);
+    if (ca_present) {
+        ca_start = b.pos;
+        mi.has_ca = true;
+        /* For an encrypted fragment, CA is decrypted before it is parsed. */
+        if (!f->enc && !parse_chan_alloc(&b, &mi.ca)) {
             f->active = false;
             return 0;
         }
-        mi.has_ca = true;
     }
     pdu_end = li_bits(li);
     if (!pdu_end || b.err) {
@@ -337,21 +522,61 @@ static unsigned mac_frag_end(struct tetra_tmo_rx *rx, const uint8_t *blk,
     }
     sdu_end = fill ? bits_strip_fill(blk, b.pos, pdu_end) : pdu_end;
 
-    if (frag_append(rx, rx->t.tn, blk, b.pos, sdu_end)) {
+    if (ca_present && f->enc) {
+        uint8_t tmp[(TETRA_TMO_MAX_SDU_BITS + 7) / 8] = { 0 };
+        unsigned nbits = sdu_end - ca_start;
+        struct bitrd ca;
+
+        if (!f->active || !f->crypto_valid ||
+            nbits > TETRA_TMO_MAX_SDU_BITS) {
+            mi.tn = rx->t.tn;
+            mi.addr_type = f->addr_type;
+            mi.ssi = f->addr;
+            emit_encrypted_llc(rx, &mi);
+            f->active = false;
+            memset(f->eck, 0, sizeof(f->eck));
+            return pdu_end;
+        }
+        bits_copy(tmp, 0, blk, ca_start, nbits);
+        if (!tmo_crypto_xor_bits(rx, f->algorithm, f->eck, tmp, 0, nbits,
+                                 cipher_offset_bits)) {
+            f->active = false;
+            memset(f->eck, 0, sizeof(f->eck));
+            return pdu_end;
+        }
+        br_init(&ca, tmp, 0, nbits);
+        if (!parse_chan_alloc(&ca, &mi.ca) || ca.err ||
+            !frag_append_plain(rx, rx->t.tn, tmp, ca.pos, nbits)) {
+            f->active = false;
+            memset(f->eck, 0, sizeof(f->eck));
+            return pdu_end;
+        }
+    } else {
+        if (!frag_append(rx, rx->t.tn, blk, b.pos, sdu_end,
+                         cipher_offset_bits))
+            return pdu_end;
+    }
+
+    if (f->active) {
         mi.tn = rx->t.tn;
         mi.addr_type = f->addr_type;
         mi.ssi = f->addr;
-        mi.enc = f->enc;
+        mi.enc = (uint8_t)(f->enc && !f->crypto_valid);
         mi.usage_marker = f->usage_marker;
         f->active = false;
-        deliver(rx, &mi, f->buf, 0, f->nbits);
+        if (mi.enc)
+            emit_encrypted_llc(rx, &mi);
+        else
+            deliver(rx, &mi, f->buf, 0, f->nbits, 0);
+        memset(f->eck, 0, sizeof(f->eck));
     }
     return pdu_end;
 }
 
 /* MAC-D-BLCK, table 21.61: implicit length of a full slot. */
 static void mac_d_blck(struct tetra_tmo_rx *rx, const uint8_t *blk,
-                       unsigned start, unsigned blk_end)
+                       unsigned start, unsigned blk_end,
+                       unsigned cipher_offset_bits)
 {
     struct bitrd b;
     struct tmo_macinfo mi;
@@ -371,11 +596,12 @@ static void mac_d_blck(struct tetra_tmo_rx *rx, const uint8_t *blk,
     if (b.err)
         return;
     sdu_end = fill ? bits_strip_fill(blk, b.pos, blk_end) : blk_end;
-    deliver(rx, &mi, blk, b.pos, sdu_end);
+    deliver(rx, &mi, blk, b.pos, sdu_end, cipher_offset_bits);
 }
 
 int tmo_mac_block(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
-                  const uint8_t *blk, unsigned nbits)
+                  const uint8_t *blk, unsigned nbits,
+                  unsigned cipher_offset_bits)
 {
     unsigned pos = 0;
     int flags = 0;
@@ -388,10 +614,11 @@ int tmo_mac_block(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
 
         switch (type) {
         case 0:
-            next = mac_resource(rx, ch, blk, pos, nbits, &flags);
+            next = mac_resource(rx, ch, blk, pos, nbits, &flags,
+                                cipher_offset_bits);
             break;
         case 1:
-            next = mac_frag_end(rx, blk, pos, nbits);
+            next = mac_frag_end(rx, blk, pos, nbits, cipher_offset_bits);
             break;
         case 2: {
             struct bitrd b;
@@ -407,7 +634,7 @@ int tmo_mac_block(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
                 if (bit_at(blk, pos + 2))
                     flags |= TMO_MAC_HALF2_STOLEN;
             } else if (ch == TMO_SCH_F) {
-                mac_d_blck(rx, blk, pos, nbits);
+                mac_d_blck(rx, blk, pos, nbits, cipher_offset_bits);
             }
             break;
         }

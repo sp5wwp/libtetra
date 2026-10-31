@@ -78,6 +78,8 @@ struct tetra_cell {
     uint32_t dl_freq_hz;      /**< Downlink frequency of the main carrier. */
     uint16_t hyperframe;      /**< Last broadcast hyperframe number. */
     uint16_t cck_id;          /**< Last broadcast CCK identifier. */
+    bool have_hyperframe;     /**< A hyperframe value has been received. */
+    bool have_cck_id;         /**< A CCK identifier has been received. */
     uint16_t service_details; /**< BS service details, 12 bits. */
     bool air_encryption;      /**< Cell uses air interface encryption. */
 };
@@ -271,9 +273,16 @@ struct tetra_traffic {
     uint16_t call_id;     /**< TMO call identifier if known. */
     uint32_t talker_ssi;  /**< Current talking party if known. */
     uint8_t circuit_type; /**< 0 = speech. */
-    bool encrypted;       /**< Traffic is encrypted: not decodable. */
+    bool encrypted;       /**< Air-interface encryption was signalled. */
     enum tetra_half half[2];
     const int8_t *bits;
+    /**
+     * Optional 274-bit traffic keystream, one 0/1 byte per bit. When non-NULL,
+     * tetra_speech_decode() removes air-interface encryption before checking
+     * speech-frame parity. NULL means that no usable key was available.
+     * Valid only during the event callback.
+     */
+    const uint8_t *cipher_keystream;
 };
 
 /** Protocol of a monitored PDU. */
