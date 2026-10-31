@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include <catch2/catch_test_macros.hpp>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -24,6 +25,15 @@ extern "C" {
 namespace
 {
 
+struct captured_pdu {
+    enum tetra_proto proto;
+    uint8_t type;
+    uint32_t addr;
+    bool encrypted;
+    uint16_t nbits;
+    std::vector<uint8_t> data;
+};
+
 struct capture {
     struct tetra_tmo_rx rx;
     unsigned locks = 0;
@@ -34,6 +44,9 @@ struct capture {
     std::vector<std::string> texts;
     std::vector<std::vector<uint8_t>> tch;
     std::vector<uint8_t> tch_um;
+    std::vector<captured_pdu> pdus;
+    std::vector<uint8_t> traffic_keystream;
+    bool traffic_encrypted = false;
     unsigned uplinks = 0;
 };
 
@@ -70,6 +83,28 @@ void on_event(void *user, const struct tetra_event *ev)
             b.push_back(ev->u.traffic.bits[i] > 0);
         c->tch.push_back(b);
         c->tch_um.push_back(ev->u.traffic.usage_marker);
+        c->traffic_encrypted = ev->u.traffic.encrypted;
+        c->traffic_keystream.clear();
+        if (ev->u.traffic.cipher_keystream) {
+            c->traffic_keystream.assign(
+                ev->u.traffic.cipher_keystream,
+                ev->u.traffic.cipher_keystream + TETRA_TCH_KSS_BITS);
+        }
+        break;
+    }
+    case TETRA_EV_PDU: {
+        captured_pdu pdu;
+
+        pdu.proto = ev->u.pdu.proto;
+        pdu.type = ev->u.pdu.type;
+        pdu.addr = ev->u.pdu.addr;
+        pdu.encrypted = ev->u.pdu.encrypted;
+        pdu.nbits = ev->u.pdu.nbits;
+        if (ev->u.pdu.data && ev->u.pdu.nbits) {
+            unsigned nbytes = (ev->u.pdu.nbits + 7u) / 8u;
+            pdu.data.assign(ev->u.pdu.data, ev->u.pdu.data + nbytes);
+        }
+        c->pdus.push_back(pdu);
         break;
     }
     case TETRA_EV_SIGNAL:
@@ -131,6 +166,26 @@ std::vector<uint8_t> null_block(unsigned nbits)
     bw_put(p, &pos, 0, 3); /* null PDU */
     bw_put(p, &pos, 1, 1); /* fill */
     return unpack(p, nbits);
+}
+
+void make_sysinfo_block(uint8_t blk[34], uint16_t carrier, uint16_t la,
+                        bool is_cck, uint16_t hf)
+{
+    unsigned pos = 0;
+
+    std::memset(blk, 0, 34);
+    bw_put(blk, &pos, 2, 2); /* MAC PDU type: SYSINFO */
+    bw_put(blk, &pos, 0, 2); /* SYSINFO subtype */
+    bw_put(blk, &pos, carrier, 12);
+    bw_put(blk, &pos, 3, 4); /* band */
+    bw_put(blk, &pos, 3, 2); /* offset */
+    bw_put(blk, &pos, 0, 3 + 1 + 2 + 3 + 4 + 4 + 4);
+    bw_put(blk, &pos, is_cck, 1);
+    bw_put(blk, &pos, hf, 16);
+    bw_put(blk, &pos, 0, 2 + 20);
+    bw_put(blk, &pos, la, 14);
+    bw_put(blk, &pos, 0xffff, 16);
+    bw_put(blk, &pos, 0xd70, 12);
 }
 
 void gen_slot(tmo_gen &g)
@@ -548,6 +603,113 @@ TEST_CASE("Random bits are not taken for an uplink", "[tmo]")
 #endif
 
 
+TEST_CASE("TMO SYNC cell change clears serving-cell associations",
+          "[tmo][cell]")
+{
+    struct tetra_tmo_rx rx{};
+    uint8_t blk[8] = {};
+    unsigned pos = 0;
+
+    rx.cell.mcc = 902;
+    rx.cell.mnc = 1234;
+    rx.cell.colour_code = 1;
+    rx.cell.system_code = 1;
+    rx.cell.sharing_mode = 0;
+    rx.frag[0].active = true;
+#if TETRA_ENABLE_CRYPTO
+    rx.frag[0].eck[0] = 0xa5;
+#endif
+    rx.calls[0].used = true;
+    rx.have_network = true;
+    rx.dl_um[0] = 7;
+
+    bw_put(blk, &pos, 1, 4);       /* system code */
+    bw_put(blk, &pos, CC, 6);
+    bw_put(blk, &pos, 0, 2);       /* timeslot */
+    bw_put(blk, &pos, 1, 5);       /* frame */
+    bw_put(blk, &pos, 1, 6);       /* multiframe */
+    bw_put(blk, &pos, 0, 2);       /* sharing mode */
+    bw_put(blk, &pos, 0, 3 + 1 + 1 + 1);
+    bw_put(blk, &pos, MCC, 10);
+    bw_put(blk, &pos, MNC, 14);
+
+    tmo_mac_sync(&rx, blk);
+    REQUIRE(rx.cell.mcc == MCC);
+    REQUIRE(rx.cell.mnc == MNC);
+    REQUIRE(rx.cell.colour_code == CC);
+    REQUIRE_FALSE(rx.frag[0].active);
+#if TETRA_ENABLE_CRYPTO
+    REQUIRE(rx.frag[0].eck[0] == 0);
+#endif
+    REQUIRE_FALSE(rx.calls[0].used);
+    REQUIRE_FALSE(rx.have_network);
+    REQUIRE(rx.dl_um[0] == 0xff);
+}
+
+TEST_CASE("TMO SYSINFO changes invalidate old call and fragment context",
+          "[tmo][cell]")
+{
+    struct tetra_tmo_rx rx{};
+    uint8_t blk[34];
+
+    rx.cell.have_sysinfo = true;
+    rx.cell.main_carrier = 3700;
+    rx.cell.band = 3;
+    rx.cell.offset = 3;
+    rx.cell.location_area = 77;
+    rx.cell.hyperframe = 66;
+    rx.cell.have_hyperframe = true;
+    rx.cell.cck_id = 9;
+    rx.cell.have_cck_id = true;
+    rx.frag[0].active = true;
+#if TETRA_ENABLE_CRYPTO
+    rx.frag[0].eck[0] = 0xa5;
+#endif
+    rx.calls[0].used = true;
+    rx.have_network = true;
+
+    /* Main-carrier change affects TB5; it invalidates ECKs and call state. */
+    make_sysinfo_block(blk, 3701, 77, false, 66);
+    tmo_mac_block(&rx, TMO_SCH_F, blk, 124, 0);
+    REQUIRE(rx.cell.main_carrier == 3701);
+    REQUIRE_FALSE(rx.frag[0].active);
+#if TETRA_ENABLE_CRYPTO
+    REQUIRE(rx.frag[0].eck[0] == 0);
+#endif
+    REQUIRE_FALSE(rx.calls[0].used);
+    REQUIRE_FALSE(rx.have_network);
+
+    /* A new CCK ID can select a different CK even with unchanged TB5 inputs. */
+    rx.frag[0].active = true;
+#if TETRA_ENABLE_CRYPTO
+    rx.frag[0].eck[0] = 0x5a;
+#endif
+    rx.calls[0].used = true;
+    make_sysinfo_block(blk, 3701, 77, true, 10);
+    tmo_mac_block(&rx, TMO_SCH_F, blk, 124, 0);
+    REQUIRE(rx.cell.cck_id == 10);
+    REQUIRE_FALSE(rx.frag[0].active);
+#if TETRA_ENABLE_CRYPTO
+    REQUIRE(rx.frag[0].eck[0] == 0);
+#endif
+    REQUIRE_FALSE(rx.calls[0].used);
+
+    /* LA is the other TB5 input and must also invalidate cached state. */
+    rx.frag[0].active = true;
+#if TETRA_ENABLE_CRYPTO
+    rx.frag[0].eck[0] = 0x3c;
+#endif
+    rx.calls[0].used = true;
+    make_sysinfo_block(blk, 3701, 78, false, 66);
+    tmo_mac_block(&rx, TMO_SCH_F, blk, 124, 0);
+    REQUIRE(rx.cell.location_area == 78);
+    REQUIRE_FALSE(rx.frag[0].active);
+#if TETRA_ENABLE_CRYPTO
+    REQUIRE(rx.frag[0].eck[0] == 0);
+#endif
+    REQUIRE_FALSE(rx.calls[0].used);
+}
+
 TEST_CASE("TMO local TDMA clock advances the hyperframe", "[tmo][crypto]")
 {
     struct tetra_tmo_rx rx{};
@@ -580,7 +742,8 @@ TEST_CASE("TMO local TDMA clock advances the hyperframe", "[tmo][crypto]")
     REQUIRE(rx.cell.hyperframe == 0x2222);
 }
 
-TEST_CASE("TMO encryption mode preserves the defined two-bit states", "[tmo][crypto]")
+TEST_CASE("TMO encryption mode preserves the defined two-bit states",
+          "[tmo][crypto]")
 {
     struct tmo_macinfo mi{};
 
@@ -601,16 +764,27 @@ struct key_request_capture {
     uint8_t encryption_mode = 0;
     bool encryption_mode_valid = false;
     bool traffic = false;
+    bool provide_key = false;
+    unsigned calls = 0;
+    std::array<uint8_t, TETRA_TEA_KEY_BYTES> ck = {
+        0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09,
+    };
 };
 
 bool capture_key_request(void *user, const tetra_tmo_key_request *request,
-                         tetra_tea_algorithm *, uint8_t[TETRA_TEA_KEY_BYTES])
+                         tetra_tea_algorithm *algorithm,
+                         uint8_t ck[TETRA_TEA_KEY_BYTES])
 {
     auto *capture = static_cast<key_request_capture *>(user);
     capture->encryption_mode = request->encryption_mode;
     capture->encryption_mode_valid = request->encryption_mode_valid;
     capture->traffic = request->traffic;
-    return false;
+    capture->calls++;
+    if (!capture->provide_key)
+        return false;
+    *algorithm = TETRA_TEA1;
+    std::memcpy(ck, capture->ck.data(), capture->ck.size());
+    return true;
 }
 } // namespace
 
@@ -634,5 +808,104 @@ TEST_CASE("TMO key provider receives the raw encryption mode", "[tmo][crypto]")
     REQUIRE(capture.encryption_mode == TETRA_TMO_ENC_ENCRYPTED_ODD);
     REQUIRE(capture.encryption_mode_valid);
     REQUIRE(capture.traffic);
+}
+
+TEST_CASE("TMO receiver decrypts MAC signalling and supplies traffic KSS",
+          "[tmo][crypto][integration]")
+{
+    capture c;
+    key_request_capture keys;
+    uint8_t blk[34] = {};
+    uint8_t eck[TETRA_TEA_KEY_BYTES] = {};
+    uint8_t stream[2] = {};
+    uint32_t iv = 0;
+    unsigned pos = 0;
+    const uint32_t address = 0x123456;
+    const uint16_t carrier = 0xabc;
+    const uint16_t location_area = 0x1234;
+    const uint8_t colour_code = 0x2d;
+
+    init(c);
+    c.rx.t = { 1, 1, 1 };
+    c.rx.cell.have_sysinfo = true;
+    c.rx.cell.main_carrier = carrier;
+    c.rx.cell.location_area = location_area;
+    c.rx.cell.colour_code = colour_code;
+    c.rx.cell.have_hyperframe = true;
+    c.rx.cell.hyperframe = 0x1234;
+    keys.provide_key = true;
+    tetra_tmo_set_key_provider(&c.rx, capture_key_request, &keys);
+
+    REQUIRE(tetra_tb5(carrier, location_area, colour_code, keys.ck.data(),
+                      eck));
+    REQUIRE(tetra_tea_build_iv(&c.rx.t, c.rx.cell.hyperframe,
+                               TETRA_TEA_DOWNLINK, &iv));
+    REQUIRE(tetra_tea_generate(TETRA_TEA1, iv, eck, sizeof(stream), stream));
+
+    /* A 56-bit MAC-RESOURCE with a 13-bit LLC PDU payload. */
+    bw_put(blk, &pos, 0, 2);       /* MAC-RESOURCE */
+    bw_put(blk, &pos, 0, 1);       /* no fill bits */
+    bw_put(blk, &pos, 0, 1);       /* no grant position */
+    bw_put(blk, &pos, 2, 2);       /* encrypted, even key identifier */
+    bw_put(blk, &pos, 0, 1);       /* no random access */
+    bw_put(blk, &pos, 7, 6);       /* seven octets */
+    bw_put(blk, &pos, 1, 3);       /* SSI address */
+    bw_put(blk, &pos, address, 24);
+    bw_put(blk, &pos, 0, 1);       /* no power control */
+    bw_put(blk, &pos, 0, 1);       /* no basic slot grant */
+    bw_put(blk, &pos, 0, 1);       /* no channel allocation */
+    const unsigned payload_start = pos;
+    bw_put(blk, &pos, 8, 4);       /* unhandled LLC PDU type */
+    bw_put(blk, &pos, 0x12d, 9);   /* known payload bits */
+    REQUIRE(pos == 56);
+
+    /* Encrypt the SDU bits as received over the air. */
+    for (unsigned i = 0; i < 13; i++) {
+        unsigned k = (stream[i >> 3] >> (7u - (i & 7u))) & 1u;
+        if (k)
+            blk[(payload_start + i) >> 3] ^=
+                (uint8_t)(0x80u >> ((payload_start + i) & 7u));
+    }
+
+    tmo_mac_block(&c.rx, TMO_SCH_F, blk, 56, 0);
+    REQUIRE(keys.calls == 1);
+    REQUIRE_FALSE(keys.traffic);
+    REQUIRE(c.pdus.size() == 1);
+    REQUIRE(c.pdus[0].proto == TETRA_PROTO_LLC);
+    REQUIRE(c.pdus[0].type == 8);
+    REQUIRE(c.pdus[0].addr == address);
+    REQUIRE_FALSE(c.pdus[0].encrypted);
+    REQUIRE(c.pdus[0].nbits == 13);
+    REQUIRE(c.pdus[0].data.size() == 2);
+    REQUIRE(bit_at(c.pdus[0].data.data(), 0) == 1);
+    for (unsigned i = 0; i < 13; i++) {
+        unsigned expected = i < 4 ? ((8u >> (3u - i)) & 1u)
+                                  : ((0x12du >> (8u - (i - 4u))) & 1u);
+        REQUIRE(bit_at(c.pdus[0].data.data(), i) == expected);
+    }
+
+    /* Traffic uses the same TB5/TEA path and exposes the full 353-bit KSS. */
+    c.rx.calls[0].used = true;
+    c.rx.calls[0].encrypted = true;
+    c.rx.calls[0].encryption_mode = TETRA_TMO_ENC_ENCRYPTED_ODD;
+    c.rx.calls[0].encryption_mode_valid = true;
+    c.rx.calls[0].usage_marker = 8;
+    c.rx.calls[0].dst_ssi = address;
+    tmo_traffic(&c.rx, 8, TETRA_HALF_TCH, TETRA_HALF_TCH);
+    REQUIRE(keys.calls == 2);
+    REQUIRE(keys.traffic);
+    REQUIRE(keys.encryption_mode == TETRA_TMO_ENC_ENCRYPTED_ODD);
+    REQUIRE(keys.encryption_mode_valid);
+    REQUIRE(c.traffic_encrypted);
+    REQUIRE(c.traffic_keystream.size() == TETRA_TCH_KSS_BITS);
+
+    uint8_t expected_stream[(TETRA_TCH_KSS_BITS + 7u) / 8u] = {};
+    REQUIRE(tetra_tea_generate(TETRA_TEA1, iv, eck, sizeof(expected_stream),
+                               expected_stream));
+    for (unsigned i = 0; i < TETRA_TCH_KSS_BITS; i++) {
+        unsigned expected =
+            (expected_stream[i >> 3] >> (7u - (i & 7u))) & 1u;
+        REQUIRE(c.traffic_keystream[i] == expected);
+    }
 }
 #endif

@@ -14,6 +14,23 @@ option(TETRA_BUILD_TOOLS "Build host tools" ${TETRA_HOST_DEFAULT})
 option(TETRA_BUILD_TESTS "Build unit tests (Catch2)" ${TETRA_HOST_DEFAULT})
 option(TETRA_ENABLE_CRYPTO "Build TEA/TB5 and TMO decryption support" OFF)
 
+# The crypto option changes public receiver-context structures. Generate the
+# config header used by both the library and its consumers, and install that
+# same header so installed consumers cannot accidentally use the source-tree
+# default (crypto disabled) with a crypto-enabled library.
+if(TETRA_ENABLE_CRYPTO)
+    set(TETRA_ENABLE_CRYPTO_VALUE 1)
+else()
+    set(TETRA_ENABLE_CRYPTO_VALUE 0)
+endif()
+set(TETRA_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+file(MAKE_DIRECTORY "${TETRA_GENERATED_INCLUDE_DIR}/tetra")
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/tetra_config.h.in"
+    "${TETRA_GENERATED_INCLUDE_DIR}/tetra/tetra_config.h"
+    @ONLY
+)
+
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
 endif()
@@ -44,10 +61,6 @@ set_target_properties(tetra PROPERTIES
     OUTPUT_NAME tetra
 )
 
-target_compile_definitions(tetra PUBLIC
-    TETRA_ENABLE_CRYPTO=$<BOOL:${TETRA_ENABLE_CRYPTO}>
-)
-
 if(TETRA_ENABLE_CRYPTO)
     target_sources(tetra PRIVATE
         src/crypto/tea.c
@@ -61,6 +74,7 @@ endif()
 
 target_include_directories(tetra
     PUBLIC
+        $<BUILD_INTERFACE:${TETRA_GENERATED_INCLUDE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
     PRIVATE
@@ -71,8 +85,31 @@ target_compile_options(tetra PRIVATE
     -Wall -Wextra -ffunction-sections -fdata-sections
 )
 
-install(TARGETS tetra ARCHIVE DESTINATION lib)
-install(DIRECTORY include/tetra DESTINATION include)
+install(TARGETS tetra EXPORT libtetraTargets ARCHIVE DESTINATION lib)
+install(DIRECTORY include/tetra DESTINATION include
+        PATTERN "tetra_config.h" EXCLUDE)
+install(FILES "${TETRA_GENERATED_INCLUDE_DIR}/tetra/tetra_config.h"
+        DESTINATION include/tetra)
+
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/libtetraConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfig.cmake"
+    INSTALL_DESTINATION lib/cmake/libtetra
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+install(EXPORT libtetraTargets
+        FILE libtetraTargets.cmake
+        NAMESPACE tetra::
+        DESTINATION lib/cmake/libtetra)
+install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfigVersion.cmake"
+        DESTINATION lib/cmake/libtetra)
 
 if(TETRA_BUILD_TOOLS OR TETRA_BUILD_TESTS)
     # Synthetic DMO traffic, shared by tetra_gen and the tests.

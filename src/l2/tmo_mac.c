@@ -22,6 +22,21 @@ static void emit_cell(struct tetra_tmo_rx *rx)
     tmo_emit(rx, &ev);
 }
 
+/* State derived from one serving cell must not leak into another. */
+static void clear_cell_associations(struct tetra_tmo_rx *rx)
+{
+    for (unsigned i = 0; i < 4; i++) {
+        rx->frag[i].active = false;
+#if TETRA_ENABLE_CRYPTO
+        memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
+#endif
+    }
+    memset(rx->calls, 0, sizeof(rx->calls));
+    memset(&rx->network, 0, sizeof(rx->network));
+    rx->have_network = false;
+    memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
+}
+
 /* SYNC PDU on the BSCH, table 21.76 + D-MLE-SYNC (table 18.17). */
 void tmo_mac_sync(struct tetra_tmo_rx *rx, const uint8_t *blk)
 {
@@ -61,12 +76,7 @@ void tmo_mac_sync(struct tetra_tmo_rx *rx, const uint8_t *blk)
         c->have_cck_id = false;
         c->hyperframe = 0;
         c->cck_id = 0;
-        for (unsigned i = 0; i < 4; i++) {
-            rx->frag[i].active = false;
-#if TETRA_ENABLE_CRYPTO
-            memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
-#endif
-        }
+        clear_cell_associations(rx);
         emit_cell(rx);
     }
 }
@@ -74,8 +84,12 @@ void tmo_mac_sync(struct tetra_tmo_rx *rx, const uint8_t *blk)
 /* SYSINFO PDU, table 21.65 + D-MLE-SYSINFO (table 18.19). */
 static void parse_sysinfo(struct tetra_tmo_rx *rx, struct bitrd *b)
 {
-    struct tetra_cell n = rx->cell;
+    struct tetra_cell old = rx->cell;
+    struct tetra_cell n = old;
     bool is_cck;
+    bool notify;
+    bool serving_cell_changed;
+    bool cck_changed;
     uint16_t hf;
 
     n.main_carrier = (uint16_t)br_get(b, 12);
@@ -92,35 +106,48 @@ static void parse_sysinfo(struct tetra_tmo_rx *rx, struct bitrd *b)
     n.service_details = (uint16_t)br_get(b, 12);
     if (b->err)
         return;
+
     n.air_encryption = (n.service_details >> 1) & 1;
     n.dl_freq_hz = tetra_carrier_hz(n.band, n.main_carrier, n.offset);
     n.have_sysinfo = true;
 
-    /* Hyperframe and CCK alternate in the same field and change slowly:
-     * they are updated but do not trigger an event on their own. */
-    n.hyperframe = rx->cell.hyperframe;
-    n.cck_id = rx->cell.cck_id;
-    n.have_hyperframe = rx->cell.have_hyperframe;
-    n.have_cck_id = rx->cell.have_cck_id;
-    if (memcmp(&n, &rx->cell, sizeof(n))) {
-        rx->cell = n;
-        if (is_cck) {
-            rx->cell.cck_id = hf;
-            rx->cell.have_cck_id = true;
-        } else {
-            rx->cell.hyperframe = hf;
-            rx->cell.have_hyperframe = true;
-        }
-        emit_cell(rx);
-        return;
-    }
+    /*
+     * Main carrier and LA are TB5 inputs. The remaining SYSINFO radio
+     * parameters also identify the serving-cell configuration and can make
+     * existing call/channel associations stale.
+     */
+    serving_cell_changed =
+        !old.have_sysinfo || old.main_carrier != n.main_carrier ||
+        old.location_area != n.location_area || old.band != n.band ||
+        old.offset != n.offset ||
+        old.duplex_spacing != n.duplex_spacing ||
+        old.reverse_operation != n.reverse_operation ||
+        old.service_details != n.service_details;
+    cck_changed = is_cck &&
+                  (!old.have_cck_id || old.cck_id != hf);
+
+    /* Keep the last value from the alternate CCK/hyperframe field. */
+    n.hyperframe = old.hyperframe;
+    n.cck_id = old.cck_id;
+    n.have_hyperframe = old.have_hyperframe;
+    n.have_cck_id = old.have_cck_id;
+
+    /* Preserve the existing event policy: HF/CCK-only updates are silent. */
+    notify = memcmp(&n, &old, sizeof(n)) != 0;
     if (is_cck) {
-        rx->cell.cck_id = hf;
-        rx->cell.have_cck_id = true;
+        n.cck_id = hf;
+        n.have_cck_id = true;
     } else {
-        rx->cell.hyperframe = hf;
-        rx->cell.have_hyperframe = true;
+        n.hyperframe = hf;
+        n.have_hyperframe = true;
     }
+    rx->cell = n;
+
+    /* A CCK change can select a different CK even when TB5 inputs are equal. */
+    if (serving_cell_changed || cck_changed)
+        clear_cell_associations(rx);
+    if (notify)
+        emit_cell(rx);
 }
 
 /* Channel allocation element, table 21.87. Returns false to discard. */

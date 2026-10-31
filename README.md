@@ -47,11 +47,12 @@ if (tetra_tea_build_iv(&time, hyperframe, TETRA_TEA_DOWNLINK, &iv) &&
 }
 ```
 
-The TEA1/2/3 source files are adapted from Osmocom `osmo-tetra` and retain
-their original AGPL-3.0-or-later licensing and copyright attribution. The
-AGPL text is included as `LICENSE-AGPL-3.0`, other libtetra files retain their
-GPL-3.0-or-later licensing. ETSI EN 300 392-7 states that the TETRA standard
-algorithms are available on a restricted basis. Users must comply with the
+The TEA1/2/3 source files and the TB5 implementation are derived from
+Osmocom `osmo-tetra` and retain their AGPL-3.0-or-later licensing and relevant
+copyright attribution. The AGPL text is included as `LICENSE-AGPL-3.0`, other
+libtetra files retain their GPL-3.0-or-later licensing. ETSI EN 300 392-7 states
+that the TETRA standard algorithms are available on a restricted basis. Users
+must comply with the
 applicable ETSI TS 101 053 terms and undertakings.
 
 ## TMO air-interface decryption
@@ -187,7 +188,9 @@ cmake --build build_m4
 ```
 
 Tests need Catch2 v3. Inside another CMake project, use
-`add_subdirectory(libtetra)` and link the `tetra` target.
+`add_subdirectory(libtetra)` and link the `tetra` target. Installed builds
+include a generated `tetra_config.h` matching the library's crypto setting and
+export the `tetra::tetra` CMake target via `find_package(libtetra CONFIG)`.
 
 ## Tools
 
