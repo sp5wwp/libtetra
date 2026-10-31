@@ -82,10 +82,10 @@ bool tetra_tea_generate(enum tetra_tea_algorithm algorithm, uint32_t iv,
                         const uint8_t key[TETRA_TEA_KEY_BYTES],
                         size_t output_len, uint8_t *output);
 
+#endif /* TETRA_ENABLE_CRYPTO */
+
 #ifdef __cplusplus
 }
 #endif
-
-#endif /* TETRA_ENABLE_CRYPTO */
 
 #endif /* TETRA_CRYPTO_H */
