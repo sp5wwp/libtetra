@@ -4,41 +4,44 @@
 #define TETRA_CONFIG_H
 
 /*
- * Compile-time sizing. Override with -D on the compiler command line.
- * All memory is statically sized inside the receiver contexts.
+ * Fallback defaults for direct source-tree consumers. CMake builds use the
+ * generated header instead. For ABI-affecting settings, configure CMake cache
+ * options rather than overriding these macros on the compiler command line.
  */
-
-/** Enable TEA1/TEA2/TEA3 and TMO air-interface decryption. */
-#ifndef TETRA_ENABLE_CRYPTO
+#if defined(TETRA_ENABLE_CRYPTO) && TETRA_ENABLE_CRYPTO != 0
+#error "TETRA_ENABLE_CRYPTO must be configured through CMake"
+#endif
+#undef TETRA_ENABLE_CRYPTO
 #define TETRA_ENABLE_CRYPTO 0
-#endif
 
-/** Largest reassembled TMO TM-SDU in bits (N.202 is 2632). */
-#ifndef TETRA_TMO_MAX_SDU_BITS
+#if defined(TETRA_TMO_MAX_SDU_BITS) && TETRA_TMO_MAX_SDU_BITS != 2632
+#error "TETRA_TMO_MAX_SDU_BITS must be configured through CMake"
+#endif
+#undef TETRA_TMO_MAX_SDU_BITS
 #define TETRA_TMO_MAX_SDU_BITS 2632
-#endif
 
-/** Largest reassembled DMO DM-SDU in bits. */
-#ifndef TETRA_DMO_MAX_SDU_BITS
+#if defined(TETRA_DMO_MAX_SDU_BITS) && TETRA_DMO_MAX_SDU_BITS != 2632
+#error "TETRA_DMO_MAX_SDU_BITS must be configured through CMake"
+#endif
+#undef TETRA_DMO_MAX_SDU_BITS
 #define TETRA_DMO_MAX_SDU_BITS 2632
-#endif
 
-/** Number of TMO calls tracked at the same time. */
-#ifndef TETRA_TMO_MAX_CALLS
+#if defined(TETRA_TMO_MAX_CALLS) && TETRA_TMO_MAX_CALLS != 8
+#error "TETRA_TMO_MAX_CALLS must be configured through CMake"
+#endif
+#undef TETRA_TMO_MAX_CALLS
 #define TETRA_TMO_MAX_CALLS 8
-#endif
 
-/** Hard bit errors tolerated when detecting the 38-bit sync sequence. */
-#ifndef TETRA_SYNC_MAX_ERRORS
+#if defined(TETRA_SYNC_MAX_ERRORS) && TETRA_SYNC_MAX_ERRORS != 4
+#error "TETRA_SYNC_MAX_ERRORS must be configured through CMake"
+#endif
+#undef TETRA_SYNC_MAX_ERRORS
 #define TETRA_SYNC_MAX_ERRORS 4
-#endif
 
-/**
- * Recognise TMO uplink signals (TETRA_EV_SIGNAL) while the TMO receiver is
- * not synchronised to a downlink. Set to 0 to save flash and RAM.
- */
-#ifndef TETRA_UPLINK_DETECT
-#define TETRA_UPLINK_DETECT 1
+#if defined(TETRA_UPLINK_DETECT) && TETRA_UPLINK_DETECT != 1
+#error "TETRA_UPLINK_DETECT must be configured through CMake"
 #endif
+#undef TETRA_UPLINK_DETECT
+#define TETRA_UPLINK_DETECT 1
 
 #endif /* TETRA_CONFIG_H */

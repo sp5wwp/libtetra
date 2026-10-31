@@ -165,8 +165,10 @@ case TETRA_EV_CALL:
 ## Footprint
 
 About 24 KB of flash. RAM is the context: 5.4 KB (DMO) or 6.7 KB (TMO),
-sizes adjustable in `tetra_config.h`, plus 1.6 KB for the speech decoder
-workspace. Stack use stays below 1 KB plus the callback.
+plus 1.6 KB for the speech decoder workspace. Receiver sizing is configured
+with the CMake cache options `TETRA_TMO_MAX_SDU_BITS`,
+`TETRA_DMO_MAX_SDU_BITS`, and `TETRA_TMO_MAX_CALLS`. Stack use stays below
+1 KB plus the callback.
 
 ## Build and test
 
@@ -187,10 +189,13 @@ cmake -B build_m4 -DCMAKE_TOOLCHAIN_FILE=cmake/arm-cortex-m4.cmake  # or m33
 cmake --build build_m4
 ```
 
-Tests need Catch2 v3. Inside another CMake project, use
-`add_subdirectory(libtetra)` and link the `tetra` target. Installed builds
-include a generated `tetra_config.h` matching the library's crypto setting and
-export the `tetra::tetra` CMake target via `find_package(libtetra CONFIG)`.
+Tests need Catch2 v3. Receiver sizing and feature settings that affect the
+public context layout are configured through CMake, for example
+`-DTETRA_TMO_MAX_CALLS=8 -DTETRA_UPLINK_DETECT=OFF`. The generated public
+`tetra_config.h` fixes these values for both the library and its consumers,
+conflicting compiler `-D` overrides are rejected. Inside another CMake
+project, use `add_subdirectory(libtetra)` and link the `tetra` target. Installed
+builds export `tetra::tetra` via `find_package(libtetra CONFIG)`.
 
 ## Tools
 

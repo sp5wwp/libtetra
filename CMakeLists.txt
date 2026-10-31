@@ -13,15 +13,42 @@ endif()
 option(TETRA_BUILD_TOOLS "Build host tools" ${TETRA_HOST_DEFAULT})
 option(TETRA_BUILD_TESTS "Build unit tests (Catch2)" ${TETRA_HOST_DEFAULT})
 option(TETRA_ENABLE_CRYPTO "Build TEA/TB5 and TMO decryption support" OFF)
+option(TETRA_UPLINK_DETECT
+       "Recognise TMO uplink signals while not synchronised" ON)
 
-# The crypto option changes public receiver-context structures. Generate the
-# config header used by both the library and its consumers, and install that
-# same header so installed consumers cannot accidentally use the source-tree
-# default (crypto disabled) with a crypto-enabled library.
+# These values affect public receiver-context layouts and must match between
+# libtetra and every consumer. Configure them here; the generated public
+# header rejects conflicting downstream -D overrides.
+set(TETRA_TMO_MAX_SDU_BITS 2632 CACHE STRING
+    "Maximum reassembled TMO TM-SDU size in bits")
+set(TETRA_DMO_MAX_SDU_BITS 2632 CACHE STRING
+    "Maximum reassembled DMO DM-SDU size in bits")
+set(TETRA_TMO_MAX_CALLS 8 CACHE STRING
+    "Maximum number of simultaneously tracked TMO calls")
+set(TETRA_SYNC_MAX_ERRORS 4 CACHE STRING
+    "Maximum hard bit errors accepted in a sync sequence (0..38)")
+
+foreach(_value TETRA_TMO_MAX_SDU_BITS TETRA_DMO_MAX_SDU_BITS TETRA_TMO_MAX_CALLS)
+    if(NOT "${${_value}}" MATCHES "^[1-9][0-9]*$")
+        message(FATAL_ERROR "${_value} must be a positive integer")
+    endif()
+endforeach()
+if(NOT "${TETRA_SYNC_MAX_ERRORS}" MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "TETRA_SYNC_MAX_ERRORS must be an integer from 0 to 38")
+endif()
+if(TETRA_SYNC_MAX_ERRORS GREATER 38)
+    message(FATAL_ERROR "TETRA_SYNC_MAX_ERRORS must be an integer from 0 to 38")
+endif()
+
 if(TETRA_ENABLE_CRYPTO)
     set(TETRA_ENABLE_CRYPTO_VALUE 1)
 else()
     set(TETRA_ENABLE_CRYPTO_VALUE 0)
+endif()
+if(TETRA_UPLINK_DETECT)
+    set(TETRA_UPLINK_DETECT_VALUE 1)
+else()
+    set(TETRA_UPLINK_DETECT_VALUE 0)
 endif()
 set(TETRA_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 file(MAKE_DIRECTORY "${TETRA_GENERATED_INCLUDE_DIR}/tetra")

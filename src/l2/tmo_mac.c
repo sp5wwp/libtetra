@@ -81,6 +81,30 @@ void tmo_mac_sync(struct tetra_tmo_rx *rx, const uint8_t *blk)
     }
 }
 
+/*
+ * Compare cell fields explicitly. Struct padding bytes are not part of the
+ * cell state and are not required to be stable across struct assignments.
+ */
+static bool cell_equal(const struct tetra_cell *a, const struct tetra_cell *b)
+{
+    return a->mcc == b->mcc && a->mnc == b->mnc &&
+           a->colour_code == b->colour_code &&
+           a->system_code == b->system_code &&
+           a->sharing_mode == b->sharing_mode &&
+           a->have_sysinfo == b->have_sysinfo &&
+           a->location_area == b->location_area &&
+           a->main_carrier == b->main_carrier && a->band == b->band &&
+           a->offset == b->offset &&
+           a->duplex_spacing == b->duplex_spacing &&
+           a->reverse_operation == b->reverse_operation &&
+           a->dl_freq_hz == b->dl_freq_hz &&
+           a->hyperframe == b->hyperframe && a->cck_id == b->cck_id &&
+           a->have_hyperframe == b->have_hyperframe &&
+           a->have_cck_id == b->have_cck_id &&
+           a->service_details == b->service_details &&
+           a->air_encryption == b->air_encryption;
+}
+
 /* SYSINFO PDU, table 21.65 + D-MLE-SYSINFO (table 18.19). */
 static void parse_sysinfo(struct tetra_tmo_rx *rx, struct bitrd *b)
 {
@@ -133,7 +157,7 @@ static void parse_sysinfo(struct tetra_tmo_rx *rx, struct bitrd *b)
     n.have_cck_id = old.have_cck_id;
 
     /* Preserve the existing event policy: HF/CCK-only updates are silent. */
-    notify = memcmp(&n, &old, sizeof(n)) != 0;
+    notify = !cell_equal(&n, &old);
     if (is_cck) {
         n.cck_id = hf;
         n.have_cck_id = true;

@@ -710,6 +710,31 @@ TEST_CASE("TMO SYSINFO changes invalidate old call and fragment context",
     REQUIRE_FALSE(rx.calls[0].used);
 }
 
+TEST_CASE("TMO SYSINFO notification compares cell fields, not padding",
+          "[tmo][cell]")
+{
+    capture c;
+    uint8_t blk[34];
+
+    init(c);
+
+    make_sysinfo_block(blk, 3701, 77, false, 66);
+    tmo_mac_block(&c.rx, TMO_SCH_F, blk, 124, 0);
+    REQUIRE(c.cells == 1);
+
+    /* Hyperframe-only updates are stored but do not emit a cell event. */
+    make_sysinfo_block(blk, 3701, 77, false, 67);
+    tmo_mac_block(&c.rx, TMO_SCH_F, blk, 124, 0);
+    REQUIRE(c.cells == 1);
+    REQUIRE(c.rx.cell.hyperframe == 67);
+
+    /* A real serving-cell field change still emits an updated event. */
+    make_sysinfo_block(blk, 3701, 78, false, 68);
+    tmo_mac_block(&c.rx, TMO_SCH_F, blk, 124, 0);
+    REQUIRE(c.cells == 2);
+    REQUIRE(c.cell.location_area == 78);
+}
+
 TEST_CASE("TMO local TDMA clock advances the hyperframe", "[tmo][crypto]")
 {
     struct tetra_tmo_rx rx{};
