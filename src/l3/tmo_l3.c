@@ -102,8 +102,13 @@ static void call_apply_mac(struct tetra_tmo_call_state *c,
         c->timeslots = mi->ca.timeslots;
         c->carrier = mi->ca.carrier;
     }
-    if (mi->enc)
+    if (tmo_macinfo_encrypted(mi)) {
         c->encrypted = true;
+#if TETRA_ENABLE_CRYPTO
+        c->encryption_mode = mi->encryption_mode;
+        c->encryption_mode_valid = true;
+#endif
+    }
     c->idle_frames = 0;
 }
 
@@ -689,20 +694,27 @@ void tmo_traffic(struct tetra_tmo_rx *rx, uint8_t um, enum tetra_half h1,
         t->talker_ssi = c->talker_ssi;
         t->circuit_type = c->circuit_type;
         t->encrypted = c->encrypted;
+#if TETRA_ENABLE_CRYPTO
         if (c->encrypted) {
             struct tetra_tmo_key_request request = {
-                &rx->cell, c->dst_ssi, um, true
+                .cell = &rx->cell,
+                .address = c->dst_ssi,
+                .usage_marker = um,
+                .traffic = true,
+                .encryption_mode = c->encryption_mode,
+                .encryption_mode_valid = c->encryption_mode_valid,
             };
             enum tetra_tea_algorithm algorithm;
             uint8_t eck[TETRA_TEA_KEY_BYTES];
 
             if (tmo_crypto_get_eck(rx, &request, &algorithm, eck) &&
                 tmo_crypto_keystream_bits(rx, algorithm, eck, 0,
-                                          sizeof(rx->traffic_keystream),
+                                          TETRA_TCH_KSS_BITS,
                                           rx->traffic_keystream))
                 t->cipher_keystream = rx->traffic_keystream;
             memset(eck, 0, sizeof(eck));
         }
+#endif
         if (!rx->cfg.promiscuous && !tmo_addressed(rx, c->dst_ssi))
             return;
     } else if (!rx->cfg.promiscuous) {

@@ -12,6 +12,7 @@ endif()
 
 option(TETRA_BUILD_TOOLS "Build host tools" ${TETRA_HOST_DEFAULT})
 option(TETRA_BUILD_TESTS "Build unit tests (Catch2)" ${TETRA_HOST_DEFAULT})
+option(TETRA_ENABLE_CRYPTO "Build TEA/TB5 and TMO decryption support" ON)
 
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo)
@@ -19,12 +20,6 @@ endif()
 
 add_library(tetra STATIC
     src/common.c
-    src/crypto/tea.c
-    src/crypto/tea1.c
-    src/crypto/tea2.c
-    src/crypto/tea3.c
-    src/crypto/tb5.c
-    src/tmo_crypto.c
     src/dmo_rx.c
     src/l1/burst.c
     src/l1/l1.c
@@ -48,6 +43,21 @@ set_target_properties(tetra PROPERTIES
     C_EXTENSIONS ON
     OUTPUT_NAME tetra
 )
+
+target_compile_definitions(tetra PUBLIC
+    TETRA_ENABLE_CRYPTO=$<BOOL:${TETRA_ENABLE_CRYPTO}>
+)
+
+if(TETRA_ENABLE_CRYPTO)
+    target_sources(tetra PRIVATE
+        src/crypto/tea.c
+        src/crypto/tea1.c
+        src/crypto/tea2.c
+        src/crypto/tea3.c
+        src/crypto/tb5.c
+        src/tmo_crypto.c
+    )
+endif()
 
 target_include_directories(tetra
     PUBLIC
@@ -90,7 +100,10 @@ if(TETRA_BUILD_TESTS)
     enable_testing()
     find_package(Catch2 3 REQUIRED)
 
-    set(TETRA_TESTS coding crypto dmo sds speech tmo tmo_l3)
+    set(TETRA_TESTS coding dmo sds speech tmo tmo_l3)
+    if(TETRA_ENABLE_CRYPTO)
+        list(APPEND TETRA_TESTS crypto)
+    endif()
     foreach(t ${TETRA_TESTS})
         add_executable(test_${t} tests/unit/test_${t}.cpp)
         set_target_properties(test_${t} PROPERTIES CXX_STANDARD 14

@@ -277,9 +277,9 @@ struct tetra_traffic {
     enum tetra_half half[2];
     const int8_t *bits;
     /**
-     * Optional 274-bit traffic keystream, one 0/1 byte per bit. When non-NULL,
-     * tetra_speech_decode() removes air-interface encryption before checking
-     * speech-frame parity. NULL means that no usable key was available.
+     * Optional TETRA_TCH_KSS_BITS-bit traffic keystream, one 0/1 byte per bit.
+     * When non-NULL, tetra_speech_decode() removes air-interface encryption
+     * before checking speech-frame parity. NULL means no usable key was found.
      * Valid only during the event callback.
      */
     const uint8_t *cipher_keystream;

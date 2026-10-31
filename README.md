@@ -83,7 +83,10 @@ tetra_tmo_set_key_provider(&rx, get_tmo_key, &keystore);
 The callback must return CK, not an already TB5-derived ECK. The MAC address
 in the request is the on-air value and may itself be encrypted, so a provider
 must not assume it is a plaintext SSI/GSSI. CCK ID is exposed when present,
-but is not required for SCK-based selection. The traffic
+but is not required for SCK-based selection. The raw two-bit MAC
+encryption-mode field is also passed to the provider: `2` indicates an even
+key identifier, `3` an odd key identifier. The field is
+marked invalid for traffic when no MAC header value was observed. The traffic
 speech decoder consumes the keystream supplied with `TETRA_EV_TRAFFIC` and
 removes encryption before validating the speech-frame parity. MAC signalling
 is decrypted before LLC/L3 parsing. If the provider has no key, the receiver
@@ -170,6 +173,10 @@ workspace. Stack use stays below 1 KB plus the callback.
 cmake -B build
 cmake --build build
 ctest --test-dir build
+
+# Disable TEA1/2/3, TB5 and TMO air-interface decryption to save flash:
+cmake -B build-no-crypto -DTETRA_ENABLE_CRYPTO=OFF -DTETRA_BUILD_TESTS=OFF
+cmake --build build-no-crypto
 
 cmake -B build_m4 -DCMAKE_TOOLCHAIN_FILE=cmake/arm-cortex-m4.cmake  # or m33
 cmake --build build_m4

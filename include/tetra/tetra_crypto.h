@@ -7,10 +7,13 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <tetra/tetra_common.h>
+#include <tetra/tetra_config.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#if TETRA_ENABLE_CRYPTO
 
 /** TEA key size, in bytes (80 bits). */
 #define TETRA_TEA_KEY_BYTES 10
@@ -82,5 +85,7 @@ bool tetra_tea_generate(enum tetra_tea_algorithm algorithm, uint32_t iv,
 #ifdef __cplusplus
 }
 #endif
+
+#endif /* TETRA_ENABLE_CRYPTO */
 
 #endif /* TETRA_CRYPTO_H */

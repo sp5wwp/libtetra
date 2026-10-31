@@ -8,6 +8,11 @@
  * All memory is statically sized inside the receiver contexts.
  */
 
+/** Enable TEA1/TEA2/TEA3 and TMO air-interface decryption. */
+#ifndef TETRA_ENABLE_CRYPTO
+#define TETRA_ENABLE_CRYPTO 1
+#endif
+
 /** Largest reassembled TMO TM-SDU in bits (N.202 is 2632). */
 #ifndef TETRA_TMO_MAX_SDU_BITS
 #define TETRA_TMO_MAX_SDU_BITS 2632

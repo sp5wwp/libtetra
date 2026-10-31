@@ -58,6 +58,7 @@ void tetra_tmo_set_slots(struct tetra_tmo_rx *rx, uint8_t mask)
     rx->slots = mask & TETRA_TS_ALL;
 }
 
+#if TETRA_ENABLE_CRYPTO
 void tetra_tmo_set_key_provider(struct tetra_tmo_rx *rx,
                                 tetra_tmo_key_provider provider, void *user)
 {
@@ -70,6 +71,7 @@ void tetra_tmo_set_key_provider(struct tetra_tmo_rx *rx,
         memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
     }
 }
+#endif /* TETRA_ENABLE_CRYPTO */
 
 const struct tetra_cell *tetra_tmo_cell(const struct tetra_tmo_rx *rx)
 {
@@ -95,7 +97,9 @@ static void set_lock(struct tetra_tmo_rx *rx, bool locked)
         memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
         for (unsigned i = 0; i < 4; i++) {
             rx->frag[i].active = false;
+#if TETRA_ENABLE_CRYPTO
             memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
+#endif
         }
     }
     memset(&ev, 0, sizeof(ev));
@@ -104,15 +108,21 @@ static void set_lock(struct tetra_tmo_rx *rx, bool locked)
     tmo_emit(rx, &ev);
 }
 
-static void advance_time(struct tetra_tmo_rx *rx)
+void tmo_advance_time(struct tetra_tmo_rx *rx)
 {
     if (++rx->t.tn > 4) {
         rx->t.tn = 1;
         tmo_frame_tick(rx);
         if (++rx->t.fn > 18) {
             rx->t.fn = 1;
-            if (++rx->t.mn > 60)
+            if (++rx->t.mn > 60) {
                 rx->t.mn = 1;
+                /* SYSINFO provides the current 16-bit hyperframe number.
+                 * Keep it aligned with locally advanced TDMA time between
+                 * subsequent SYSINFO updates. */
+                if (rx->cell.have_hyperframe)
+                    rx->cell.hyperframe++;
+            }
         }
     }
 }
@@ -221,8 +231,10 @@ static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
     if (!(rx->slots & (1u << (rx->t.tn - 1)))) {
         rx->dl_um[rx->t.tn - 1] = 0xff;
         rx->frag[rx->t.tn - 1].active = false;
+#if TETRA_ENABLE_CRYPTO
         memset(rx->frag[rx->t.tn - 1].eck, 0,
                sizeof(rx->frag[rx->t.tn - 1].eck));
+#endif
         if (sb)
             decode_bsch(rx, s);
         return;
@@ -417,7 +429,7 @@ static __attribute__((noinline)) void cand_check(struct tetra_tmo_rx *rx)
         /* decode_bsch() set the time; handle the rest of the slot */
         process_slot(rx, rx->slot_start, true, false);
         rx->slot_start += SLOT_BITS;
-        advance_time(rx);
+        tmo_advance_time(rx);
     }
 }
 
@@ -429,7 +441,7 @@ static __attribute__((noinline)) void slots_due(struct tetra_tmo_rx *rx)
         if (!rx->locked)
             break;
         rx->slot_start += SLOT_BITS;
-        advance_time(rx);
+        tmo_advance_time(rx);
     }
 }
 

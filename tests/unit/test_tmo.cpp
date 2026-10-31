@@ -12,6 +12,7 @@
 
 extern "C" {
 #include "util/bits.h"
+#include "tmo_int.h"
 }
 
 #include "../vectors/osmo_tmo_tch.h"
@@ -543,5 +544,95 @@ TEST_CASE("Random bits are not taken for an uplink", "[tmo]")
     init(c);
     tetra_tmo_push_bits(&c.rx, b.data(), b.size());
     REQUIRE(c.uplinks == 0);
+}
+#endif
+
+
+TEST_CASE("TMO local TDMA clock advances the hyperframe", "[tmo][crypto]")
+{
+    struct tetra_tmo_rx rx{};
+
+    rx.t.tn = 4;
+    rx.t.fn = 18;
+    rx.t.mn = 60;
+    rx.cell.have_hyperframe = true;
+    rx.cell.hyperframe = 0x1234;
+    tmo_advance_time(&rx);
+
+    REQUIRE(rx.t.tn == 1);
+    REQUIRE(rx.t.fn == 1);
+    REQUIRE(rx.t.mn == 1);
+    REQUIRE(rx.cell.hyperframe == 0x1235);
+
+    rx.t.tn = 4;
+    rx.t.fn = 18;
+    rx.t.mn = 60;
+    rx.cell.hyperframe = 0xffff;
+    tmo_advance_time(&rx);
+    REQUIRE(rx.cell.hyperframe == 0);
+
+    rx.t.tn = 4;
+    rx.t.fn = 18;
+    rx.t.mn = 60;
+    rx.cell.have_hyperframe = false;
+    rx.cell.hyperframe = 0x2222;
+    tmo_advance_time(&rx);
+    REQUIRE(rx.cell.hyperframe == 0x2222);
+}
+
+TEST_CASE("TMO encryption mode preserves the defined two-bit states", "[tmo][crypto]")
+{
+    struct tmo_macinfo mi{};
+
+    mi.encryption_mode = TETRA_TMO_ENC_CLEAR;
+    REQUIRE_FALSE(tmo_macinfo_encrypted(&mi));
+    mi.encryption_mode = TETRA_TMO_ENC_RESERVED;
+    REQUIRE_FALSE(tmo_macinfo_encrypted(&mi));
+    mi.encryption_mode = TETRA_TMO_ENC_ENCRYPTED_EVEN;
+    REQUIRE(tmo_macinfo_encrypted(&mi));
+    mi.encryption_mode = TETRA_TMO_ENC_ENCRYPTED_ODD;
+    REQUIRE(tmo_macinfo_encrypted(&mi));
+}
+
+#if TETRA_ENABLE_CRYPTO
+namespace
+{
+struct key_request_capture {
+    uint8_t encryption_mode = 0;
+    bool encryption_mode_valid = false;
+    bool traffic = false;
+};
+
+bool capture_key_request(void *user, const tetra_tmo_key_request *request,
+                         tetra_tea_algorithm *, uint8_t[TETRA_TEA_KEY_BYTES])
+{
+    auto *capture = static_cast<key_request_capture *>(user);
+    capture->encryption_mode = request->encryption_mode;
+    capture->encryption_mode_valid = request->encryption_mode_valid;
+    capture->traffic = request->traffic;
+    return false;
+}
+} // namespace
+
+TEST_CASE("TMO key provider receives the raw encryption mode", "[tmo][crypto]")
+{
+    struct tetra_tmo_rx rx{};
+    key_request_capture capture;
+    struct tetra_tmo_key_request request{};
+    enum tetra_tea_algorithm algorithm = TETRA_TEA1;
+    uint8_t eck[TETRA_TEA_KEY_BYTES] = {};
+
+    rx.cell.have_sysinfo = true;
+    rx.cell.have_hyperframe = true;
+    tetra_tmo_set_key_provider(&rx, capture_key_request, &capture);
+    request.cell = &rx.cell;
+    request.encryption_mode = TETRA_TMO_ENC_ENCRYPTED_ODD;
+    request.encryption_mode_valid = true;
+    request.traffic = true;
+
+    REQUIRE_FALSE(tmo_crypto_get_eck(&rx, &request, &algorithm, eck));
+    REQUIRE(capture.encryption_mode == TETRA_TMO_ENC_ENCRYPTED_ODD);
+    REQUIRE(capture.encryption_mode_valid);
+    REQUIRE(capture.traffic);
 }
 #endif

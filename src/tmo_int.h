@@ -39,7 +39,7 @@ struct tmo_chan_alloc {
 struct tmo_macinfo {
     uint8_t tn;
     uint8_t addr_type;
-    uint8_t enc;
+    uint8_t encryption_mode; /* Raw two-bit MAC ENC field. */
     uint8_t usage_marker; /* 0 if not assigned by this PDU */
     uint32_t ssi;
     bool has_ca;
@@ -55,7 +55,14 @@ int tmo_mac_block(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
                   const uint8_t *blk, unsigned nbits,
                   unsigned cipher_offset_bits);
 
+static inline bool tmo_macinfo_encrypted(const struct tmo_macinfo *mi)
+{
+    return mi->encryption_mode == TETRA_TMO_ENC_ENCRYPTED_EVEN ||
+           mi->encryption_mode == TETRA_TMO_ENC_ENCRYPTED_ODD;
+}
+
 /* TMO air-interface cryptography (src/tmo_crypto.c). */
+#if TETRA_ENABLE_CRYPTO
 bool tmo_crypto_get_eck(struct tetra_tmo_rx *rx,
                         const struct tetra_tmo_key_request *request,
                         enum tetra_tea_algorithm *algorithm,
@@ -70,6 +77,9 @@ bool tmo_crypto_xor_bits(struct tetra_tmo_rx *rx,
                          const uint8_t eck[TETRA_TEA_KEY_BYTES],
                          uint8_t *buf, unsigned start, unsigned nbits,
                          unsigned bit_offset);
+#endif /* TETRA_ENABLE_CRYPTO */
+
+void tmo_advance_time(struct tetra_tmo_rx *rx);
 
 /* LLC, MLE and layer 3 (src/l3/tmo_l3.c) */
 void tmo_llc(struct tetra_tmo_rx *rx, const struct tmo_macinfo *mi,

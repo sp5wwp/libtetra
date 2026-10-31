@@ -323,10 +323,11 @@ int tetra_speech_decode(struct tetra_speech_ws *ws,
         return ok ? 2 : 0;
     }
 
-    /* First half stolen: the second speech frame uses keystream bits 137..273. */
+    /* Only TCH/S half 2 is present. Its cipher allocation begins at KSS
+     * bit 216 (not at bit 137, which is the second frame of a full slot). */
     ok = speech_decode_half_cipher(
         ws, t->bits + 216, out->bits[1],
-        t->cipher_keystream ? t->cipher_keystream + TETRA_SPEECH_BITS : NULL);
+        t->cipher_keystream ? t->cipher_keystream + 216 : NULL);
     out->bfi[1] = !ok;
     return ok ? 1 : 0;
 }

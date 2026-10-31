@@ -59,21 +59,32 @@ bool tmo_crypto_xor_bits(struct tetra_tmo_rx *rx,
                          uint8_t *buf, unsigned start, unsigned nbits,
                          unsigned bit_offset)
 {
-    uint8_t stream[TMO_CRYPTO_MAX_BITS];
+    uint32_t iv;
+    unsigned total;
+    unsigned nbytes;
+    /* Keystream is already packed: one bit per bit, not one byte per bit.
+     * Max stack use is therefore 356 bytes for the largest configured SDU. */
+    uint8_t stream[(TMO_CRYPTO_MAX_BITS + 7u) / 8u];
 
-    if (!buf || start > TETRA_TMO_MAX_SDU_BITS ||
+    if (!rx || !eck || !buf || start > TETRA_TMO_MAX_SDU_BITS ||
         nbits > TETRA_TMO_MAX_SDU_BITS - start ||
         bit_offset > TMO_CRYPTO_MAX_BITS ||
-        nbits > TMO_CRYPTO_MAX_BITS - bit_offset ||
-        !tmo_crypto_keystream_bits(rx, algorithm, eck, bit_offset, nbits,
-                                   stream))
+        nbits > TMO_CRYPTO_MAX_BITS - bit_offset)
+        return false;
+
+    total = bit_offset + nbits;
+    nbytes = (total + 7u) / 8u;
+    if (!tetra_tea_build_iv(&rx->t, rx->cell.hyperframe,
+                            TETRA_TEA_DOWNLINK, &iv) ||
+        !tetra_tea_generate(algorithm, iv, eck, nbytes, stream))
         return false;
 
     for (unsigned i = 0; i < nbits; i++) {
         unsigned p = start + i;
-        uint8_t mask = (uint8_t)(0x80u >> (p & 7));
-        if (stream[i])
+        if (bit_at(stream, bit_offset + i)) {
+            uint8_t mask = (uint8_t)(0x80u >> (p & 7));
             buf[p >> 3] ^= mask;
+        }
     }
     return true;
 }

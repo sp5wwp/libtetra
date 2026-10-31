@@ -9,10 +9,9 @@
  * Feed it the demodulated bit stream of one carrier; it acquires the
  * synchronisation burst, follows the TDMA structure and reports cell
  * information, call control, short data and traffic through the event
- * callback. Air-interface encryption can be decoded when an application
- * installs a key-provider callback with tetra_tmo_set_key_provider().
- * Encrypted data remains reported as encrypted when no matching key is
- * available.
+ * callback. When TETRA_ENABLE_CRYPTO is enabled, air-interface encryption can
+ * be decoded through an application key-provider callback. Otherwise encrypted
+ * traffic/signalling is left opaque and reported as encrypted.
  *
  * While not synchronised, the receiver recognises TMO uplink transmissions
  * and reports them once with TETRA_EV_SIGNAL (TETRA_UPLINK_DETECT).
@@ -21,7 +20,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <tetra/tetra_common.h>
+#include <tetra/tetra_config.h>
+#if TETRA_ENABLE_CRYPTO
 #include <tetra/tetra_crypto.h>
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -29,16 +31,26 @@ extern "C" {
 
 /* ---- Context. Allocate statically; fields are private. ---- */
 
+enum tetra_tmo_encryption_mode {
+    TETRA_TMO_ENC_CLEAR = 0,
+    TETRA_TMO_ENC_RESERVED = 1,
+    TETRA_TMO_ENC_ENCRYPTED_EVEN = 2,
+    TETRA_TMO_ENC_ENCRYPTED_ODD = 3,
+};
+
 struct tetra_tmo_frag {
     bool active;
-    uint8_t enc;
+    bool encrypted;
+    uint8_t encryption_mode; /* Raw two-bit MAC encryption mode. */
     uint8_t addr_type;
     uint8_t usage_marker;
     uint32_t addr;
     uint16_t nbits;
+#if TETRA_ENABLE_CRYPTO
     bool crypto_valid;
     enum tetra_tea_algorithm algorithm;
     uint8_t eck[TETRA_TEA_KEY_BYTES];
+#endif
     uint8_t buf[(TETRA_TMO_MAX_SDU_BITS + 7) / 8];
 };
 
@@ -58,6 +70,10 @@ struct tetra_tmo_call_state {
     uint16_t idle_frames;
     uint32_t dst_ssi;
     uint32_t talker_ssi;
+#if TETRA_ENABLE_CRYPTO
+    uint8_t encryption_mode;
+    bool encryption_mode_valid;
+#endif
 };
 
 struct tetra_tmo_uldet {
@@ -68,12 +84,15 @@ struct tetra_tmo_uldet {
     uint32_t last_dl; /* bit count at the last downlink evidence */
 };
 
+#if TETRA_ENABLE_CRYPTO
 /** Context passed to the application key provider. */
 struct tetra_tmo_key_request {
     const struct tetra_cell *cell;
     uint32_t address;      /**< SSI/GSSI as received; may be ciphered, or 0. */
     uint8_t usage_marker;  /**< TMO usage marker, or 0 when unavailable. */
     bool traffic;          /**< True for traffic-channel decryption. */
+    uint8_t encryption_mode; /**< Raw MAC ENC field: 2=even, 3=odd; 0 if unknown. */
+    bool encryption_mode_valid; /**< Whether encryption_mode was observed. */
 };
 
 /**
@@ -91,6 +110,11 @@ typedef bool (*tetra_tmo_key_provider)(
     void *user, const struct tetra_tmo_key_request *request,
     enum tetra_tea_algorithm *algorithm,
     uint8_t ck[TETRA_TEA_KEY_BYTES]);
+
+#endif /* TETRA_ENABLE_CRYPTO */
+
+/* 353 KSS bits cover the second-half-only TCH/S allocation. */
+#define TETRA_TCH_KSS_BITS 353
 
 struct tetra_tmo_rx {
     struct tetra_rx_config cfg;
@@ -110,9 +134,11 @@ struct tetra_tmo_rx {
     uint8_t dl_um[4];
     uint8_t blk[2][34];
     int8_t tch[TETRA_TCH_BITS];
-    uint8_t traffic_keystream[274];
+#if TETRA_ENABLE_CRYPTO
+    uint8_t traffic_keystream[TETRA_TCH_KSS_BITS];
     tetra_tmo_key_provider key_provider;
     void *key_provider_user;
+#endif
     struct tetra_tmo_frag frag[4];
     struct tetra_tmo_call_state calls[TETRA_TMO_MAX_CALLS];
 #if TETRA_UPLINK_DETECT
@@ -132,9 +158,12 @@ void tetra_tmo_init(struct tetra_tmo_rx *rx, const struct tetra_rx_config *cfg);
  * Configure the callback used to select provisioned base keys for TMO
  * decryption. Pass NULL to disable decryption. The callback may be changed
  * from an event callback; changes apply to subsequently processed blocks.
+ * This API is available when TETRA_ENABLE_CRYPTO is enabled at build time.
  */
+#if TETRA_ENABLE_CRYPTO
 void tetra_tmo_set_key_provider(struct tetra_tmo_rx *rx,
                                 tetra_tmo_key_provider provider, void *user);
+#endif
 
 /**
  * \brief Feed demodulated symbols as dibits.
