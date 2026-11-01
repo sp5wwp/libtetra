@@ -125,7 +125,7 @@ tetra_tmo_set_cck_provider(&rx, get_cck, &keystore);
 
 The CCK is used directly (not through TB5) and is independent of the traffic
 key provider. `tetra_ta61_decrypt_ssi()` exposes the primitive on its own.
-Decryption is applied to SSI-bearing MAC address types; USSI, which is the
+Decryption is applied to SSI-bearing MAC address types. USSI, which is the
 explicitly unencrypted form, is left as received.
 
 TA61 builds on the Hurdle block cipher. These two files are **not bundled**:
@@ -142,8 +142,8 @@ M33):
 
 - **Strict aliasing.** The same buffers are accessed as both `uint8_t` and
   `uint32_t`, which is undefined behaviour and can be miscompiled at `-O2`.
-  The CMake build compiles the vendored files with `-fno-strict-aliasing`;
-  reproduce that flag in any other build system.
+  The CMake build compiles the vendored files with `-fno-strict-aliasing`.
+  Reproduce that flag in any other build system.
 - **Alignment.** At `-O2` the two adjacent word casts in `HURDLE_encrypt`
   compile to `LDRD`/`STRD`, which fault on an unaligned address on Cortex-M
   regardless of `CCR.UNALIGN_TRP` (unlike a single `LDR`). The state buffers
@@ -228,7 +228,7 @@ case TETRA_EV_CALL:
 
 To follow calls allocated to other carriers of the cell, give a retune
 callback. It is asked to tune to the call's carrier and back to the main
-carrier when the call ends; return false to stay where you are:
+carrier when the call ends. Return false to stay where you are:
 
 ```c
 static bool on_retune(void *user, const struct tetra_retune *r)
@@ -241,15 +241,79 @@ static bool on_retune(void *user, const struct tetra_retune *r)
 cfg.retune = on_retune;
 ```
 
-To listen to the uplink of a cell, synchronise to its downlink first (or
-call `tetra_tmo_set_uplink_cell()`), then tune to `cell->ul_freq_hz` and
-call `tetra_tmo_resync()`. Uplink events have `ev->uplink` set; the sending
-MS is in `src_ssi`.
+When you retune the radio yourself, for scanning or cell reselection, call
+`tetra_tmo_resync()` so the receiver drops lock and re-acquires on the new
+frequency instead of asking you to tune back.
+
+To listen to the uplink of a cell, synchronise to its downlink first, or
+call `tetra_tmo_set_uplink_cell()`, then tune to `cell->ul_freq_hz` and call
+`tetra_tmo_resync()`. Uplink events have `ev->uplink` set and the sending MS
+is in `src_ssi`.
+
+## Events
+
+Everything the receiver decodes arrives through the one callback in
+`tetra_rx_config`. Each `struct tetra_event` carries a `type`, the `mode`
+(TMO or DMO), the TDMA `time`, and an `uplink` flag. The payload is in the
+`u` union and is valid only during the callback, so copy anything you keep.
+
+- `TETRA_EV_SYNC`, burst lock gained or lost, in `u.sync.locked`.
+- `TETRA_EV_CELL`, TMO cell information after SYNC or SYSINFO, in `u.cell`.
+- `TETRA_EV_NETWORK`, the TMO network broadcast with neighbour cells and
+  network time, in `u.network`.
+- `TETRA_EV_CALL`, call control from set-up through release, in `u.call`.
+- `TETRA_EV_SDS`, a short data or status message, in `u.sds`.
+- `TETRA_EV_TRAFFIC`, one traffic slot of soft bits for the codec, in
+  `u.traffic`.
+- `TETRA_EV_MM`, TMO mobility management such as registration and group
+  attachment, in `u.mm`.
+- `TETRA_EV_CHANNEL`, a DMO channel state change, in `u.channel`.
+- `TETRA_EV_PDU`, any other layer 2 or 3 PDU for monitoring, in `u.pdu`.
+- `TETRA_EV_SIGNAL`, a recognised signal that cannot be decoded, such as a
+  TMO uplink burst seen while not synchronised.
+
+Set `promiscuous` in the config to see every call. Leave it off and set
+`issi` and the `groups` array to hear only about your own identities. Call,
+SDS and traffic events then carry an `addressed` flag.
+
+## Short data, text and location
+
+An SDS event hands you the raw short data in `u.sds`. For the common
+payloads `tetra_sds.h` turns the bits into something usable. Each parser
+returns 0 when the message is of that kind and fills a struct that points
+back into the event data.
+
+- `tetra_sds_parse_text` then `tetra_sds_text_utf8` give a NUL terminated
+  UTF-8 string. GSM 7-bit, ISO 8859-1 and UCS-2 convert exactly.
+- `tetra_sds_parse_location` then `tetra_sds_location_ascii` give NMEA
+  location sentences as ASCII text.
+- `tetra_sds_parse_lip` decodes a Location Information Protocol report into
+  `struct tetra_lip`, with latitude and longitude in units of 1e-7 degrees.
+
+```c
+struct tetra_sds_text t;
+char text[160];
+if (tetra_sds_parse_text(&ev->u.sds, &t) == 0)
+    tetra_sds_text_utf8(&t, text, sizeof(text));
+```
+
+## Cell and network information
+
+After the first SYNC and SYSINFO the current cell is in `u.cell` and from
+`tetra_tmo_cell()`. It holds the mobile country and network codes, colour
+code, location area, main carrier, and the downlink and uplink frequencies
+in Hz as `dl_freq_hz` and `ul_freq_hz`. `TETRA_EV_NETWORK` and
+`tetra_tmo_network()` add neighbour cells, each with its own frequency, and
+the network time. `tetra_carrier_hz()` and `tetra_uplink_hz()` compute a
+carrier frequency from the band, carrier number and duplex fields when you
+need one outside an event.
 
 ## Footprint
 
-About 24 KB of flash. RAM is the context: 5.4 KB (DMO) or 6.7 KB (TMO),
-plus 1.6 KB for the speech decoder workspace. Receiver sizing is configured
+About 24 KB of flash for the core receiver, more with crypto or the uplink
+decoder enabled. RAM is the receiver context, measured for Cortex-M at
+5.4 KB for DMO, 6.8 KB for TMO, or 7.3 KB for TMO with crypto, plus 1.6 KB
+for the speech decoder workspace. Receiver sizing is configured
 with the CMake cache options `TETRA_TMO_MAX_SDU_BITS`,
 `TETRA_DMO_MAX_SDU_BITS`, and `TETRA_TMO_MAX_CALLS`. Stack use stays below
 1 KB plus the callback. `-DTETRA_UPLINK_DECODE=OFF` leaves out the uplink
