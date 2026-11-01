@@ -226,29 +226,63 @@ case TETRA_EV_CALL:
     break;
 ```
 
-To follow calls allocated to other carriers of the cell, give a retune
-callback. It is asked to tune to the call's carrier and back to the main
-carrier when the call ends. Return false to stay where you are:
-
-```c
-static bool on_retune(void *user, const struct tetra_retune *r)
-{
-    if (r->reason == TETRA_RETUNE_CALL && !r->addressed)
-        return false;               /* only follow our own calls */
-    return radio_set_rx_hz(r->freq_hz) == 0;
-}
-
-cfg.retune = on_retune;
-```
-
-When you retune the radio yourself, for scanning or cell reselection, call
-`tetra_tmo_resync()` so the receiver drops lock and re-acquires on the new
-frequency instead of asking you to tune back.
+A TMO call can be moved to another carrier of the cell. The retune callback
+lets the receiver follow it, see Following calls across carriers below.
 
 To listen to the uplink of a cell, synchronise to its downlink first, or
 call `tetra_tmo_set_uplink_cell()`, then tune to `cell->ul_freq_hz` and call
 `tetra_tmo_resync()`. Uplink events have `ev->uplink` set and the sending MS
 is in `src_ssi`.
+
+## Following calls across carriers
+
+A TMO cell can move a call to one of its other carriers. Set `retune` in
+`tetra_rx_config` and the receiver asks the application to tune there, and
+back again when the call is over. It never touches the radio itself. DMO has
+no carrier allocation and never calls it.
+
+```c
+static bool on_retune(void *user, const struct tetra_retune *r)
+{
+    if (r->reason == TETRA_RETUNE_CALL && !r->addressed)
+        return false;
+    return radio_set_rx_hz(r->freq_hz) == 0;
+}
+```
+
+The callback is asked for one of two things, given in `r->reason`.
+
+- `TETRA_RETUNE_CALL` comes when a channel allocation for a known call
+  points to a carrier other than the one being received. `call_id`,
+  `dst_ssi`, `timeslots` and `addressed` describe the call. Uplink only
+  allocations are ignored.
+- `TETRA_RETUNE_MAIN` asks to go back to the main carrier of the cell. It
+  comes when the followed call is released, when it has been silent for
+  about a minute, or when lock is lost while away from the main carrier. It
+  is not sent if the radio is already on the main carrier.
+
+Every request carries the downlink frequency `freq_hz`, the matching uplink
+frequency `ul_freq_hz` (0 if the duplex spacing is unknown) and the carrier
+number.
+
+Return true only once the radio receives `freq_hz`, and keep pushing
+samples. The carriers of a cell share the TDMA timing, so the receiver stays
+locked across the switch. Return false to stay where you are. Allocations
+are repeated on air, so a declined call may be offered again.
+
+Some details worth knowing.
+
+- Only calls for your own identities are offered unless `promiscuous` is
+  set. Use `addressed` to filter in promiscuous mode.
+- One call is followed at a time. While following it, allocations for other
+  calls are not offered.
+- The frequency comes from the cell SYSINFO, so no request is made before
+  the first SYSINFO unless the allocation carries its own band information.
+- The callback runs in the context that pushes samples, like the event
+  callback. Keep it short. It may call `tetra_tmo_set_slots()` with
+  `r->timeslots` to decode only the slots of the followed call.
+- If you change frequency on your own, call `tetra_tmo_resync()`. The
+  receiver then re-acquires where it is and does not ask to go back.
 
 ## Events
 
