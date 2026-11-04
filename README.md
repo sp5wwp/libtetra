@@ -310,14 +310,6 @@ key provider. `tetra_ta61_decrypt_ssi()` exposes the primitive on its own.
 Decryption is applied to SSI-bearing MAC address types. USSI, which is the
 explicitly unencrypted form, is left as received.
 
-TA61 builds on the Hurdle block cipher. These two files are **not bundled**:
-copy them unchanged from an `osmo-tetra` checkout into `src/crypto/` before
-building with crypto enabled:
-
-```
-cp osmo-tetra/src/crypto/{taa1.c,taa1.h,hurdle.c,hurdle.h} src/crypto/
-```
-
 ## Footprint
 
 About 24 KB of flash for the core receiver, more with crypto or the uplink
