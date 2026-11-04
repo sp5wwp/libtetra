@@ -32,134 +32,6 @@ key, and encrypted MAC identities resolved when it provides the cell CCK.
 Also not supported: D8PSK/QAM, DM-GATE operation, transmitting through a
 DM-REP. Circuit mode data is delivered undecoded.
 
-## TEA keystream generation
-
-The `tetra_crypto.h` API generates TEA1, TEA2, or TEA3 keystream bytes from
-an 80-bit ECK and a 29-bit IV. `tetra_tea_build_iv()` assembles the TMO IV
-from the slot, frame, multiframe, hyperframe extension, and link direction.
-The caller remains responsible for key management when using the primitive
-API directly. Consume generated bits most-significant-bit first. For receiver
-integration, see the TMO air-interface decryption section below.
-
-```c
-#include <tetra/tetra.h>
-
-struct tetra_time time = { .tn = 1, .fn = 1, .mn = 1 };
-uint8_t eck[TETRA_TEA_KEY_BYTES] = { 0 }; /* replace with the active ECK */
-uint8_t keystream[54];
-uint32_t iv;
-
-if (tetra_tea_build_iv(&time, hyperframe, TETRA_TEA_DOWNLINK, &iv) &&
-    tetra_tea_generate(TETRA_TEA1, iv, eck, sizeof(keystream), keystream)) {
-    /* Use keystream bytes, MSB first, to encrypt/decrypt the MAC fields. */
-}
-```
-
-The TEA1/2/3 source files, the TB5 implementation and the TA61/Hurdle
-primitive (`src/crypto/taa1.c`, `src/crypto/hurdle.c`, vendored unchanged)
-are derived from Osmocom `osmo-tetra` and retain their AGPL-3.0-or-later
-licensing and relevant copyright attribution. The AGPL text is included as
-`LICENSE-AGPL-3.0`, other libtetra files retain their GPL-3.0-or-later
-licensing. ETSI EN 300 392-7 states
-that the TETRA standard algorithms are available on a restricted basis. Users
-must comply with the
-applicable ETSI TS 101 053 terms and undertakings.
-
-## TMO air-interface decryption
-
-TMO TEA1/TEA2/TEA3 decryption is enabled by supplying a base-key provider.
-The callback selects the applicable provisioned 80-bit CK for the current
-cell (normally the CCK or SCK) and returns the network key-stream generator.
-libtetra applies TB5 using the SYSINFO main carrier, location area and colour
-code, then uses the cell hyperframe and current TDMA position to construct the
-cipher IV. The application remains responsible for securely storing keys and
-selecting the correct key for the cell and traffic context.
-
-```c
-static bool get_tmo_key(void *user,
-                        const struct tetra_tmo_key_request *request,
-                        enum tetra_tea_algorithm *algorithm,
-                        uint8_t ck[TETRA_TEA_KEY_BYTES])
-{
-    struct my_keystore *store = user;
-
-    /* Select by cell/network metadata. request->address may be ciphered. */
-    return my_keystore_lookup(store, request, algorithm, ck);
-}
-
-/* After tetra_tmo_init(): */
-tetra_tmo_set_key_provider(&rx, get_tmo_key, &keystore);
-```
-
-The callback must return CK, not an already TB5-derived ECK. The MAC address
-in the request is the on-air value and may itself be encrypted, so a provider
-must not assume it is a plaintext SSI/GSSI. CCK ID is exposed when present,
-but is not required for SCK-based selection. The raw two-bit MAC
-encryption-mode field is also passed to the provider: `2` indicates an even
-key identifier, `3` an odd key identifier. The field is
-marked invalid for traffic when no MAC header value was observed. The traffic
-speech decoder consumes the keystream supplied with `TETRA_EV_TRAFFIC` and
-removes encryption before validating the speech-frame parity. MAC signalling
-is decrypted before LLC/L3 parsing. If the provider has no key, the receiver
-continues reporting the encrypted PDU/traffic state without attempting to
-parse ciphertext. The provider is responsible for the relevant CCK/SCK key
-selection. Individual DCK/GCK derivation and key-file parsing are not
-implemented by this interface.
-
-### Identity decryption (TA61)
-
-On networks that encrypt identities, the SSI in a TMO MAC address is the
-encrypted short identity (ESI). Supplying a CCK provider lets the receiver
-recover the cleartext SSI with TA61, so call tracking, SDS, the addressed
-test and carrier following see the real identity:
-
-```c
-static bool get_cck(void *user, const struct tetra_cell *cell,
-                    uint8_t cck[TETRA_TEA_KEY_BYTES])
-{
-    return my_keystore_cck(user, cell->mcc, cell->mnc, cell->cck_id, cck);
-}
-
-tetra_tmo_set_cck_provider(&rx, get_cck, &keystore);
-```
-
-The CCK is used directly (not through TB5) and is independent of the traffic
-key provider. `tetra_ta61_decrypt_ssi()` exposes the primitive on its own.
-Decryption is applied to SSI-bearing MAC address types. USSI, which is the
-explicitly unencrypted form, is left as received.
-
-TA61 builds on the Hurdle block cipher. These two files are **not bundled**:
-copy them unchanged from an `osmo-tetra` checkout into `src/crypto/` before
-building with crypto enabled:
-
-```
-cp osmo-tetra/src/crypto/{taa1.c,taa1.h,hurdle.c,hurdle.h} src/crypto/
-```
-
-`hurdle.c` reads and writes its 8-byte cipher state with word-sized casts
-over `uint8_t` buffers. This needs care on ARMv7-M / ARMv8-M (Cortex-M3/M4/
-M33):
-
-- **Strict aliasing.** The same buffers are accessed as both `uint8_t` and
-  `uint32_t`, which is undefined behaviour and can be miscompiled at `-O2`.
-  The CMake build compiles the vendored files with `-fno-strict-aliasing`.
-  Reproduce that flag in any other build system.
-- **Alignment.** At `-O2` the two adjacent word casts in `HURDLE_encrypt`
-  compile to `LDRD`/`STRD`, which fault on an unaligned address on Cortex-M
-  regardless of `CCR.UNALIGN_TRP` (unlike a single `LDR`). The state buffers
-  are `uint8_t[]` locals, so a HardFault depends on stack placement and can
-  appear with a compiler change. For a dependable MCU build, replace the
-  four `*(uint32_t *)` accesses of `abInput`/`abOutput` in `HURDLE_encrypt`
-  with `memcpy` (the compiler lowers it to safe byte accesses), or make
-  those buffers word-aligned. Cortex-A (e.g. A55) and other AArch64/x86
-  targets tolerate the unaligned access and are unaffected.
-
-The compile-time `__BYTE_ORDER`/`__LITTLE_ENDIAN` switch in these files also
-resolves to the little-endian path only by accident when those macros are
-undefined (as on bare-metal toolchains): both sides evaluate to 0. That is
-correct for little-endian Cortex targets but is worth pinning explicitly if
-you build for anything else.
-
 ## Usage
 
 ```c
@@ -341,6 +213,110 @@ in Hz as `dl_freq_hz` and `ul_freq_hz`. `TETRA_EV_NETWORK` and
 the network time. `tetra_carrier_hz()` and `tetra_uplink_hz()` compute a
 carrier frequency from the band, carrier number and duplex fields when you
 need one outside an event.
+
+## TEA keystream generation
+
+The `tetra_crypto.h` API generates TEA1, TEA2, or TEA3 keystream bytes from
+an 80-bit ECK and a 29-bit IV. `tetra_tea_build_iv()` assembles the TMO IV
+from the slot, frame, multiframe, hyperframe extension, and link direction.
+The caller remains responsible for key management when using the primitive
+API directly. Consume generated bits most-significant-bit first. For receiver
+integration, see the TMO air-interface decryption section below.
+
+```c
+#include <tetra/tetra.h>
+
+struct tetra_time time = { .tn = 1, .fn = 1, .mn = 1 };
+uint8_t eck[TETRA_TEA_KEY_BYTES] = { 0 }; /* replace with the active ECK */
+uint8_t keystream[54];
+uint32_t iv;
+
+if (tetra_tea_build_iv(&time, hyperframe, TETRA_TEA_DOWNLINK, &iv) &&
+    tetra_tea_generate(TETRA_TEA1, iv, eck, sizeof(keystream), keystream)) {
+    /* Use keystream bytes, MSB first, to encrypt/decrypt the MAC fields. */
+}
+```
+
+The TEA1/2/3 source files, the TB5 implementation and the TA61/Hurdle
+primitive (`src/crypto/taa1.c`, `src/crypto/hurdle.c`, vendored unchanged)
+are derived from Osmocom `osmo-tetra` and retain their AGPL-3.0-or-later
+licensing and relevant copyright attribution. The AGPL text is included as
+`LICENSE-AGPL-3.0`, other libtetra files retain their GPL-3.0-or-later
+licensing. ETSI EN 300 392-7 states
+that the TETRA standard algorithms are available on a restricted basis. Users
+must comply with the
+applicable ETSI TS 101 053 terms and undertakings.
+
+## TMO air-interface decryption
+
+TMO TEA1/TEA2/TEA3 decryption is enabled by supplying a base-key provider.
+The callback selects the applicable provisioned 80-bit CK for the current
+cell (normally the CCK or SCK) and returns the network key-stream generator.
+libtetra applies TB5 using the SYSINFO main carrier, location area and colour
+code, then uses the cell hyperframe and current TDMA position to construct the
+cipher IV. The application remains responsible for securely storing keys and
+selecting the correct key for the cell and traffic context.
+
+```c
+static bool get_tmo_key(void *user,
+                        const struct tetra_tmo_key_request *request,
+                        enum tetra_tea_algorithm *algorithm,
+                        uint8_t ck[TETRA_TEA_KEY_BYTES])
+{
+    struct my_keystore *store = user;
+
+    /* Select by cell/network metadata. request->address may be ciphered. */
+    return my_keystore_lookup(store, request, algorithm, ck);
+}
+
+/* After tetra_tmo_init(): */
+tetra_tmo_set_key_provider(&rx, get_tmo_key, &keystore);
+```
+
+The callback must return CK, not an already TB5-derived ECK. The MAC address
+in the request is the on-air value and may itself be encrypted, so a provider
+must not assume it is a plaintext SSI/GSSI. CCK ID is exposed when present,
+but is not required for SCK-based selection. The raw two-bit MAC
+encryption-mode field is also passed to the provider: `2` indicates an even
+key identifier, `3` an odd key identifier. The field is
+marked invalid for traffic when no MAC header value was observed. The traffic
+speech decoder consumes the keystream supplied with `TETRA_EV_TRAFFIC` and
+removes encryption before validating the speech-frame parity. MAC signalling
+is decrypted before LLC/L3 parsing. If the provider has no key, the receiver
+continues reporting the encrypted PDU/traffic state without attempting to
+parse ciphertext. The provider is responsible for the relevant CCK/SCK key
+selection. Individual DCK/GCK derivation and key-file parsing are not
+implemented by this interface.
+
+### Identity decryption (TA61)
+
+On networks that encrypt identities, the SSI in a TMO MAC address is the
+encrypted short identity (ESI). Supplying a CCK provider lets the receiver
+recover the cleartext SSI with TA61, so call tracking, SDS, the addressed
+test and carrier following see the real identity:
+
+```c
+static bool get_cck(void *user, const struct tetra_cell *cell,
+                    uint8_t cck[TETRA_TEA_KEY_BYTES])
+{
+    return my_keystore_cck(user, cell->mcc, cell->mnc, cell->cck_id, cck);
+}
+
+tetra_tmo_set_cck_provider(&rx, get_cck, &keystore);
+```
+
+The CCK is used directly (not through TB5) and is independent of the traffic
+key provider. `tetra_ta61_decrypt_ssi()` exposes the primitive on its own.
+Decryption is applied to SSI-bearing MAC address types. USSI, which is the
+explicitly unencrypted form, is left as received.
+
+TA61 builds on the Hurdle block cipher. These two files are **not bundled**:
+copy them unchanged from an `osmo-tetra` checkout into `src/crypto/` before
+building with crypto enabled:
+
+```
+cp osmo-tetra/src/crypto/{taa1.c,taa1.h,hurdle.c,hurdle.h} src/crypto/
+```
 
 ## Footprint
 
