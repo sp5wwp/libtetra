@@ -29,7 +29,7 @@ The TEA API exposes keystream generation, TB5 derivation, TA61 identity
 decryption and a TMO receiver key-provider interface. TMO signalling and
 speech can be decrypted when the application provides the correct provisioned
 key, and encrypted MAC identities resolved when it provides the cell CCK.
-Also not supported: D8PSK/QAM, DM-GATE operation, transmitting through a
+Not supported: D8PSK/QAM, DM-GATE operation, transmitting through a
 DM-REP. Circuit mode data is delivered undecoded.
 
 ## Usage
@@ -238,8 +238,8 @@ if (tetra_tea_build_iv(&time, hyperframe, TETRA_TEA_DOWNLINK, &iv) &&
 ```
 
 The TEA1/2/3 source files, the TB5 implementation and the TA61/Hurdle
-primitive (`src/crypto/taa1.c`, `src/crypto/hurdle.c`, vendored unchanged)
-are derived from Osmocom `osmo-tetra` and retain their AGPL-3.0-or-later
+primitive (`src/crypto/taa1.c` vendored unchanged, `src/crypto/hurdle.c`
+with an alignment fix) are derived from Osmocom `osmo-tetra` and retain their AGPL-3.0-or-later
 licensing and relevant copyright attribution. The AGPL text is included as
 `LICENSE-AGPL-3.0`, other libtetra files retain their GPL-3.0-or-later
 licensing. ETSI EN 300 392-7 states
@@ -310,6 +310,9 @@ key provider. `tetra_ta61_decrypt_ssi()` exposes the primitive on its own.
 Decryption is applied to SSI-bearing MAC address types. USSI, which is the
 explicitly unencrypted form, is left as received.
 
+The vendored `taa1.c` and `hurdle.c` must be compiled with
+`-fno-strict-aliasing`. CMake does this, other build systems must add it.
+
 ## Footprint
 
 About 24 KB of flash for the core receiver, more with crypto or the uplink
@@ -332,9 +335,9 @@ ctest --test-dir build
 cmake -B build-crypto -DTETRA_ENABLE_CRYPTO=ON
 cmake --build build-crypto
 
-# Explicitly disable crypto in an existing build directory:
-cmake -B build-no-crypto -DTETRA_ENABLE_CRYPTO=OFF
-cmake --build build-no-crypto
+# Or turn crypto off again in an existing build directory:
+cmake -B build-crypto -DTETRA_ENABLE_CRYPTO=OFF
+cmake --build build-crypto
 
 cmake -B build_m4 -DCMAKE_TOOLCHAIN_FILE=cmake/arm-cortex-m4.cmake  # or m33
 cmake --build build_m4
@@ -347,6 +350,19 @@ public context layout are configured through CMake, for example
 conflicting compiler `-D` overrides are rejected. Inside another CMake
 project, use `add_subdirectory(libtetra)` and link the `tetra` target. Installed
 builds export `tetra::tetra` via `find_package(libtetra CONFIG)`.
+
+## Installing
+
+```bash
+cmake -B build -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake --build build
+sudo cmake --install build
+```
+
+This installs the static `libtetra.a`, the headers and a CMake package.
+Include `<tetra/tetra.h>` and link with `-ltetra`, or use
+`find_package(libtetra CONFIG)` and `tetra::tetra` from CMake. Build options
+are fixed at install time for every program using that copy.
 
 ## Tools
 

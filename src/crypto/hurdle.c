@@ -4,6 +4,9 @@
  *
  * Author: Wouter Bokslag <w.bokslag [ ] midnightblue [ ] nl>
  *
+ * Modified 2026-11 for libtetra: the cipher state is loaded and stored
+ * with memcpy, so it no longer needs word alignment on Cortex-M.
+ *
  * SPDX-License-Identifier: AGPL-3.0+
  *
  * This program is free software: you can redistribute it and/or modify
