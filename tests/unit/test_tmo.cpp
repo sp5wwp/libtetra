@@ -1189,3 +1189,45 @@ TEST_CASE("TMO receiver decrypts the MAC identity with TA61",
     }
 }
 #endif
+
+TEST_CASE("TMO receiver re-aligns its slot grid after a jump in the stream",
+          "[tmo]")
+{
+    static capture c;
+
+    /* Bits lost after three multiframes: odd and even counts, less and
+     * more than a slot. Two would stay within the timing search. */
+    for (unsigned drop : { 1u, 6u, 37u, 255u, 509u, 1000u, 3152u }) {
+        tmo_gen g;
+
+        for (unsigned i = 0; i < 4 * 18 * 12; i++)
+            gen_slot(g);
+        const size_t cut = 510u * 4 * 18 * 3 + 123;
+        std::vector<uint8_t> bits(g.bits.begin(), g.bits.begin() + cut);
+        bits.insert(bits.end(), g.bits.begin() + cut + drop, g.bits.end());
+
+        INFO("bits dropped: " << drop);
+        c.locks = 0;
+        init(c);
+        tetra_tmo_push_bits(&c.rx, bits.data(), cut);
+        REQUIRE(c.locks == 1);
+        const uint32_t before = c.rx.crc_ok;
+
+        /* The next sync burst comes within a multiframe and moves the grid
+         * onto the bursts again: the lock is kept */
+        const size_t mid = cut + 510u * 4 * 18 * 2;
+        tetra_tmo_push_bits(&c.rx, bits.data() + cut, mid - cut);
+        REQUIRE(c.rx.realigned == 1);
+        REQUIRE(c.rx.realign_shift <= -(int32_t)drop + 4);
+        REQUIRE(c.rx.realign_shift >= -(int32_t)drop - 4);
+        REQUIRE(c.locks == 1);
+        REQUIRE(tetra_tmo_locked(&c.rx));
+
+        /* and the blocks decode as before the jump: four slots a frame */
+        const uint32_t mid_ok = c.rx.crc_ok;
+        tetra_tmo_push_bits(&c.rx, bits.data() + mid, bits.size() - mid);
+        REQUIRE(mid_ok > before);
+        REQUIRE(c.rx.crc_ok - mid_ok > 4 * 18 * 6);
+        REQUIRE(c.rx.realigned == 1);
+    }
+}
