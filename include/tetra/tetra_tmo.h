@@ -195,6 +195,21 @@ struct tetra_tmo_rx {
     struct tetra_tmo_ul uld;
 #endif
     struct tetra_tmo_follow follow;
+    /* Downlink blocks whose CRC passed (BSCH, SCH/HD, SCH/F, STCH), for a
+     * caller to tell a working lock from one that keeps the burst timing
+     * but decodes nothing. Wraps. */
+    uint32_t crc_ok;
+    /* Re-alignment while locked: slots since a block last passed its CRC,
+     * crc_ok then, and the sync burst being checked off the slot grid. */
+    uint32_t crc_seen;
+    uint16_t deaf_slots;
+    bool realign_cand;
+    uint32_t realign_start;
+    /* Times the slot grid was moved onto a sync burst found elsewhere, and
+     * by how many bits the last time (where the grid would have put that
+     * burst's slot, to where it was). Wraps. */
+    uint32_t realigned;
+    int32_t realign_shift;
 };
 
 /**
