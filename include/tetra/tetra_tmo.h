@@ -195,6 +195,10 @@ struct tetra_tmo_rx {
     struct tetra_tmo_ul uld;
 #endif
     struct tetra_tmo_follow follow;
+    /* Downlink blocks whose CRC passed (BSCH, SCH/HD, SCH/F, STCH), for a
+     * caller to tell a working lock from one that keeps the burst timing
+     * but decodes nothing. Wraps. */
+    uint32_t crc_ok;
 };
 
 /**

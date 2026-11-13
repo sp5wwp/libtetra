@@ -165,6 +165,7 @@ static bool decode_bsch(struct tetra_tmo_rx *rx, uint32_t s)
     rxcore_copy(&rx->core, s + TMO_SB_SB, sb, 120);
     if (!lmac_decode(&rx->ws, LMAC_SCH_S, sb, tetra_scramb_init(0), rx->blk[0]))
         return false;
+    rx->crc_ok++;
     tmo_mac_sync(rx, rx->blk[0]);
     return true;
 }
@@ -206,7 +207,10 @@ static bool decode_half(struct tetra_tmo_rx *rx, uint32_t pos, uint8_t *out)
     int8_t *b = rx->ws.in;
 
     rxcore_copy(&rx->core, pos, b, 216);
-    return lmac_decode(&rx->ws, LMAC_SCH_H, b, rx->scramb, out);
+    if (!lmac_decode(&rx->ws, LMAC_SCH_H, b, rx->scramb, out))
+        return false;
+    rx->crc_ok++;
+    return true;
 }
 
 static void process_traffic_full(struct tetra_tmo_rx *rx, uint32_t s,
@@ -290,8 +294,10 @@ static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
 
         rxcore_copy(&rx->core, s + TMO_NDB_BLK1, b, 216);
         rxcore_copy(&rx->core, s + TMO_NDB_BLK2, b + 216, 216);
-        if (lmac_decode(&rx->ws, LMAC_SCH_F, b, rx->scramb, rx->blk[0]))
+        if (lmac_decode(&rx->ws, LMAC_SCH_F, b, rx->scramb, rx->blk[0])) {
+            rx->crc_ok++;
             tmo_mac_block(rx, TMO_SCH_F, rx->blk[0], 268, 0);
+        }
         return;
     }
 
