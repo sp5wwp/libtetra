@@ -212,12 +212,48 @@ static void follow_check(struct tetra_tmo_rx *rx)
         !rx->cell.have_sysinfo || f->pend_carrier != rx->cell.main_carrier;
 }
 
+static void emit_call(struct tetra_tmo_rx *rx,
+                      const struct tetra_tmo_call_state *c,
+                      enum tetra_call_what what, uint8_t cause);
+
+/*
+ * A usage marker is valid only on the channel it was assigned with: a
+ * carrier, its timeslots and a direction (EN 300 392-2 clause 23.5.5). The
+ * same value can name other calls on other channels at the same time.
+ * Traffic goes to the call holding its marker on the channel received
+ * (tmo_traffic()), and that traffic keeps the call from expiring: a call
+ * whose release went unheard, its marker then given to a new call on the
+ * same channel, took the new call's traffic, its talker and its encryption
+ * for as long as the marker carried traffic. Release the calls still
+ * holding a marker given to another call on the same channel.
+ */
+static void um_take(struct tetra_tmo_rx *rx, struct tetra_tmo_call_state *c,
+                    uint8_t um, const struct tmo_chan_alloc *ca)
+{
+    for (unsigned i = 0; i < TETRA_TMO_MAX_CALLS; i++) {
+        struct tetra_tmo_call_state *o = &rx->calls[i];
+
+        if (o == c || !o->used || o->usage_marker != um)
+            continue;
+        /* Only where both channels are known to be the same one */
+        if (o->carrier != ca->carrier || !(o->timeslots & ca->timeslots))
+            continue;
+        emit_call(rx, o, TETRA_CALL_RELEASE, 0xff);
+        o->used = false;
+        follow_end(rx, o);
+    }
+}
+
 static void call_apply_mac(struct tetra_tmo_rx *rx,
                            struct tetra_tmo_call_state *c,
                            const struct tmo_macinfo *mi)
 {
-    if (mi->usage_marker)
+    /* An uplink-only allocation does not change the downlink marker */
+    if (mi->usage_marker && !(mi->has_ca && mi->ca.ul_dl == 2)) {
+        if (mi->has_ca)
+            um_take(rx, c, mi->usage_marker, &mi->ca);
         c->usage_marker = mi->usage_marker;
+    }
     if (mi->has_ca) {
         c->timeslots = mi->ca.timeslots;
         c->carrier = mi->ca.carrier;
@@ -820,11 +856,31 @@ void tmo_traffic(struct tetra_tmo_rx *rx, uint8_t um, enum tetra_half h1,
     struct tetra_event ev;
     struct tetra_traffic *t = &ev.u.traffic;
     struct tetra_tmo_call_state *c = NULL;
+    /* The channel received: carrier and timeslot */
+    uint16_t cn = rx->cell.main_carrier;
+    const uint8_t ts = (rx->t.tn >= 1 && rx->t.tn <= 4)
+                           ? (uint8_t)(1u << (rx->t.tn - 1)) : 0;
+    int best = 0;
 
+    if (rx->follow.active && rx->follow.tuned != 0xffff)
+        cn = rx->follow.tuned;
+    /* The call holding the marker on this channel; one whose channel is
+     * not known yet if none is known to be on it */
     for (unsigned i = 0; i < TETRA_TMO_MAX_CALLS; i++) {
-        if (rx->calls[i].used && rx->calls[i].usage_marker == um) {
-            c = &rx->calls[i];
-            break;
+        struct tetra_tmo_call_state *o = &rx->calls[i];
+        int score;
+
+        if (!o->used || o->usage_marker != um)
+            continue;
+        if (o->carrier == 0xffff || o->timeslots == 0 || ts == 0)
+            score = 1;
+        else if (o->carrier == cn && (o->timeslots & ts))
+            score = 2;
+        else
+            continue;
+        if (score > best) {
+            best = score;
+            c = o;
         }
     }
 

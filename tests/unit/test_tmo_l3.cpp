@@ -21,6 +21,7 @@ struct capture {
     std::vector<struct tetra_call> calls;
     std::vector<struct tetra_mm> mm;
     std::vector<struct tetra_network> nwrk;
+    std::vector<struct tetra_traffic> traffic;
     unsigned pdus = 0;
 };
 
@@ -40,6 +41,9 @@ void on_event(void *user, const struct tetra_event *ev)
         break;
     case TETRA_EV_PDU:
         c->pdus++;
+        break;
+    case TETRA_EV_TRAFFIC:
+        c->traffic.push_back(ev->u.traffic);
         break;
     default:
         break;
@@ -81,7 +85,7 @@ struct sdu {
     }
 };
 
-void deliver(capture &c, const sdu &s, uint32_t ssi)
+void deliver(capture &c, const sdu &s, uint32_t ssi, uint8_t um = 0)
 {
     struct tmo_macinfo mi;
 
@@ -89,7 +93,30 @@ void deliver(capture &c, const sdu &s, uint32_t ssi)
     mi.tn = 1;
     mi.addr_type = TMO_ADDR_SSI;
     mi.ssi = ssi;
+    mi.usage_marker = um;
     tmo_llc(&c.rx, &mi, s.b, 0, s.n);
+}
+
+/* D-SETUP of a group call, transmission granted to the caller */
+sdu cmce_setup(uint16_t id, uint32_t caller)
+{
+    sdu s(TETRA_PROTO_CMCE);
+
+    s.put(7, 5)
+        .put(id, 14)
+        .put(0, 4 + 1 + 1)
+        .put(0x04, 8) /* point to multipoint */
+        .put(0, 2)
+        .put(0, 1)
+        .put(0, 4)
+        .put(1, 1)
+        .put(0, 1)
+        .put(0, 1)
+        .put(1, 1)
+        .put(1, 2)
+        .put(caller, 24)
+        .put(0, 1);
+    return s;
 }
 
 /* MM PDUs captured from the MorganBTS recording (after the MM PD). */
@@ -348,4 +375,72 @@ TEST_CASE("CMCE call set-up and floor control PDUs", "[tmo][cmce]")
     REQUIRE(c.calls[6].status == TETRA_CALL_ST_CONTINUE);
     REQUIRE(c.calls[7].call_id == 101);
     REQUIRE(c.calls[8].src_ssi == other);
+}
+
+/* A usage marker assignment with its channel allocation (downlink) */
+static void deliver_ca(capture &c, const sdu &s, uint32_t ssi, uint8_t um,
+                       uint16_t carrier, uint8_t timeslots)
+{
+    struct tmo_macinfo mi;
+
+    std::memset(&mi, 0, sizeof(mi));
+    mi.tn = 1;
+    mi.addr_type = TMO_ADDR_SSI;
+    mi.ssi = ssi;
+    mi.usage_marker = um;
+    mi.has_ca = true;
+    mi.ca.ul_dl = 3;
+    mi.ca.carrier = carrier;
+    mi.ca.timeslots = timeslots;
+    tmo_llc(&c.rx, &mi, s.b, 0, s.n);
+}
+
+static bool released(const capture &c, uint16_t id)
+{
+    for (const auto &k : c.calls)
+        if (k.what == TETRA_CALL_RELEASE && k.call_id == id)
+            return true;
+    return false;
+}
+
+TEST_CASE("CMCE usage marker given to a new call on the same channel",
+          "[tmo][cmce]")
+{
+    static capture c;
+    const uint8_t um = 20;
+
+    init(c);
+    c.rx.t.tn = 2; /* traffic received on timeslot 2 of carrier 100 */
+    c.rx.cell.main_carrier = 100;
+    /* Call 100 on carrier 100, TS2, marker 20; its release goes unheard */
+    deliver_ca(c, cmce_setup(100, 555), 9001, um, 100, 0x2);
+    tmo_traffic(&c.rx, um, TETRA_HALF_TCH, TETRA_HALF_TCH);
+    REQUIRE(c.traffic.size() == 1);
+    REQUIRE(c.traffic[0].call_id == 100);
+
+    /* Call 300 gets the same marker on another channel (TS3): legal, both
+     * stay, and the traffic on TS2 is still call 100's */
+    deliver_ca(c, cmce_setup(300, 777), 9003, um, 100, 0x4);
+    REQUIRE_FALSE(released(c, 100));
+    tmo_traffic(&c.rx, um, TETRA_HALF_TCH, TETRA_HALF_TCH);
+    REQUIRE(c.traffic.back().call_id == 100);
+    c.rx.t.tn = 3;
+    tmo_traffic(&c.rx, um, TETRA_HALF_TCH, TETRA_HALF_TCH);
+    REQUIRE(c.traffic.back().call_id == 300);
+
+    /* Call 200 gets marker 20 on call 100's channel: call 100 is released
+     * and the traffic on TS2 is call 200's, its talker too */
+    deliver_ca(c, cmce_setup(200, 666), 9002, um, 100, 0x2);
+    REQUIRE(released(c, 100));
+    REQUIRE_FALSE(released(c, 300));
+    c.rx.t.tn = 2;
+    tmo_traffic(&c.rx, um, TETRA_HALF_TCH, TETRA_HALF_TCH);
+    REQUIRE(c.traffic.back().call_id == 200);
+    REQUIRE(c.traffic.back().talker_ssi == 666);
+
+    /* A call keeping its marker is not released by its own PDUs */
+    const size_t calls = c.calls.size();
+    deliver_ca(c, cmce_setup(200, 666), 9002, um, 100, 0x2);
+    for (size_t i = calls; i < c.calls.size(); i++)
+        REQUIRE(c.calls[i].what != TETRA_CALL_RELEASE);
 }
