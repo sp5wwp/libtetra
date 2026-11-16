@@ -106,6 +106,9 @@ static void set_lock(struct tetra_tmo_rx *rx, bool locked, bool follow)
     if (rx->locked == locked)
         return;
     rx->locked = locked;
+    rx->realign_cand = false;
+    rx->deaf_slots = 0;
+    rx->crc_seen = rx->crc_ok;
 #if TETRA_UPLINK_DETECT
     memset(&rx->ul, 0, sizeof(rx->ul));
 #endif
@@ -165,6 +168,7 @@ static bool decode_bsch(struct tetra_tmo_rx *rx, uint32_t s)
     rxcore_copy(&rx->core, s + TMO_SB_SB, sb, 120);
     if (!lmac_decode(&rx->ws, LMAC_SCH_S, sb, tetra_scramb_init(0), rx->blk[0]))
         return false;
+    rx->crc_ok++;
     tmo_mac_sync(rx, rx->blk[0]);
     return true;
 }
@@ -206,7 +210,10 @@ static bool decode_half(struct tetra_tmo_rx *rx, uint32_t pos, uint8_t *out)
     int8_t *b = rx->ws.in;
 
     rxcore_copy(&rx->core, pos, b, 216);
-    return lmac_decode(&rx->ws, LMAC_SCH_H, b, rx->scramb, out);
+    if (!lmac_decode(&rx->ws, LMAC_SCH_H, b, rx->scramb, out))
+        return false;
+    rx->crc_ok++;
+    return true;
 }
 
 static void process_traffic_full(struct tetra_tmo_rx *rx, uint32_t s,
@@ -290,8 +297,10 @@ static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
 
         rxcore_copy(&rx->core, s + TMO_NDB_BLK1, b, 216);
         rxcore_copy(&rx->core, s + TMO_NDB_BLK2, b + 216, 216);
-        if (lmac_decode(&rx->ws, LMAC_SCH_F, b, rx->scramb, rx->blk[0]))
+        if (lmac_decode(&rx->ws, LMAC_SCH_F, b, rx->scramb, rx->blk[0])) {
+            rx->crc_ok++;
             tmo_mac_block(rx, TMO_SCH_F, rx->blk[0], 268, 0);
+        }
         return;
     }
 
@@ -662,7 +671,70 @@ static __attribute__((noinline)) void slots_due(struct tetra_tmo_rx *rx)
             break;
         rx->slot_start += SLOT_BITS;
         tmo_advance_time(rx);
+        if (rx->crc_ok != rx->crc_seen) {
+            rx->crc_seen = rx->crc_ok;
+            rx->deaf_slots = 0;
+        } else if (rx->deaf_slots < UINT16_MAX) {
+            rx->deaf_slots++;
+        }
     }
+}
+
+/*
+ * Locked on a wrong slot grid. Once the timing is lost (a jump in the symbol
+ * stream, from the transmitter or on the way), the training sequences still
+ * match by chance every few slots at the +-TIMING_SEARCH offsets tried, so
+ * LOCK_LOSS_SLOTS in a row without one never comes: the lock stays and no
+ * block decodes, for good. Seen with a lab cell, after long SDS.
+ *
+ * So after REALIGN_DEAF_SLOTS without one block passing its CRC, also look
+ * for the sync burst anywhere, as when not locked, and move the grid onto
+ * one whose BSCH passes its CRC. A sync burst is only ever on the grid of
+ * the cell sending it: one decoding where the grid does not is the cell's
+ * real timing. Calls, fragments and the cell are kept.
+ */
+#define REALIGN_DEAF_SLOTS 8
+
+static unsigned hyper_slot(const struct tetra_time *t)
+{
+    return ((unsigned)(t->mn - 1) * 18u + (unsigned)(t->fn - 1)) * 4u +
+           (unsigned)(t->tn - 1);
+}
+
+static __attribute__((noinline)) void realign(struct tetra_tmo_rx *rx)
+{
+    if (!rx->realign_cand) {
+        if (rxcore_sync_hit(&rx->core)) {
+            rx->realign_start = rx->core.wr - (TMO_SB_TRAIN + 38);
+            rx->realign_cand = true;
+        }
+        return;
+    }
+    if (rx->core.wr < rx->realign_start + SLOT_BITS + TIMING_SEARCH)
+        return;
+    rx->realign_cand = false;
+
+    /* Where the grid has the slot the burst will name */
+    const struct tetra_time old_t = rx->t;
+    const uint32_t old_start = rx->slot_start;
+
+    if (!decode_bsch(rx, rx->realign_start))
+        return; /* sets rx->t to the burst's slot on success */
+    int32_t slots = (int32_t)((hyper_slot(&rx->t) + 4320u -
+                               hyper_slot(&old_t)) % 4320u);
+    if (slots >= 2160)
+        slots -= 4320;
+    rx->realign_shift = (int32_t)(rx->realign_start -
+                                  (old_start + (uint32_t)(slots * SLOT_BITS)));
+    rx->realigned++;
+    rx->slot_start = rx->realign_start;
+    rx->bad_slots = 0;
+    rx->deaf_slots = 0;
+    rx->crc_seen = rx->crc_ok;
+    /* decode_bsch() set the time; handle the rest of the slot */
+    process_slot(rx, rx->slot_start, true, false);
+    rx->slot_start += SLOT_BITS;
+    tmo_advance_time(rx);
 }
 
 /* Per bit fast path. The rare work is kept out of line. */
@@ -673,6 +745,10 @@ static inline void push_one(struct tetra_tmo_rx *rx, int8_t s)
     if (rx->locked) {
         if (rx->core.wr >= rx->slot_start + SLOT_BITS + 2 * TIMING_SEARCH)
             slots_due(rx);
+        if (rx->locked && rx->deaf_slots >= REALIGN_DEAF_SLOTS)
+            realign(rx);
+        else
+            rx->realign_cand = false;
         return;
     }
     search(rx);
