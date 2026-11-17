@@ -203,6 +203,7 @@ struct tetra_tmo_rx {
      * crc_ok then, and the sync burst being checked off the slot grid. */
     uint32_t crc_seen;
     uint16_t deaf_slots;
+    bool aach_ok; /* an AACH decoded in the slot being processed */
     bool realign_cand;
     uint32_t realign_start;
     /* Times the slot grid was moved onto a sync burst found elsewhere, and
@@ -312,6 +313,27 @@ void tetra_tmo_resync(struct tetra_tmo_rx *rx);
 void tetra_tmo_set_uplink_cell(struct tetra_tmo_rx *rx, uint16_t mcc,
                                uint16_t mnc, uint8_t colour_code);
 #endif
+
+/**
+ * \brief Downlink blocks whose CRC passed (BSCH, SCH/HD, SCH/F, STCH).
+ *
+ * Rises steadily while the lock decodes. Wraps.
+ *
+ * @param rx: receiver context.
+ * @return count since tetra_tmo_init().
+ */
+uint32_t tetra_tmo_crc_ok(const struct tetra_tmo_rx *rx);
+
+/**
+ * \brief Times the slot grid was moved onto a sync burst of the cell found
+ * off the grid, after a jump in the symbol stream. Wraps.
+ *
+ * @param rx: receiver context.
+ * @param last_shift: if not NULL, receives the bits moved the last time.
+ * @return count since tetra_tmo_init().
+ */
+uint32_t tetra_tmo_realigned(const struct tetra_tmo_rx *rx,
+                             int32_t *last_shift);
 
 /**
  * \brief Current cell information.

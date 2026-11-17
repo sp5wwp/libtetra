@@ -36,7 +36,7 @@ struct captured_pdu {
 
 struct capture {
     struct tetra_tmo_rx rx;
-    unsigned locks = 0;
+    unsigned locks = 0, unlocks = 0;
     struct tetra_cell cell;
     unsigned cells = 0;
     std::vector<struct tetra_call> calls;
@@ -71,6 +71,8 @@ void on_event(void *user, const struct tetra_event *ev)
     case TETRA_EV_SYNC:
         if (ev->u.sync.locked)
             c->locks++;
+        else
+            c->unlocks++;
         break;
     case TETRA_EV_CELL:
         c->cell = *ev->u.cell;
@@ -151,6 +153,10 @@ struct tmo_gen {
     std::vector<uint8_t> bits;
     /* SCH/F blocks to send, in order, on TN1 of frames 1..17 */
     std::vector<std::vector<uint8_t>> schf;
+    uint8_t cc = CC;
+    /* Traffic with this usage marker on this timeslot, 0 = none */
+    uint8_t tch_tn = 0, tch_um = 0;
+    uint32_t r = 0x12345678; /* traffic bits */
 };
 
 uint32_t scramb()
@@ -205,15 +211,20 @@ void gen_slot(tmo_gen &g)
 {
     uint8_t slot[510], bb[30], b1[216], b2[216], t5[432];
     uint16_t aach = 0; /* header 00: common control */
+    const uint32_t sc =
+        tetra_scramb_init(tetra_tmo_colour_code(MCC, MNC, g.cc));
+    const bool tch = g.synced && g.tch_tn == g.tn && g.fn != 18;
 
-    tetra_encode_aach(aach, scramb(), bb);
+    if (tch)
+        aach = (uint16_t)((1u << 12) | (g.tch_um << 6)); /* DL usage */
+    tetra_encode_aach(aach, sc, bb);
 
     if (g.fn == 18 && (g.mn + g.tn) % 4 == 3) {
         uint8_t p[16] = { 0 }, sb[120];
         unsigned pos = 0;
 
         bw_put(p, &pos, 1, 4);
-        bw_put(p, &pos, CC, 6);
+        bw_put(p, &pos, g.cc, 6);
         bw_put(p, &pos, g.tn - 1u, 2);
         bw_put(p, &pos, g.fn, 5);
         bw_put(p, &pos, g.mn, 6);
@@ -244,18 +255,26 @@ void gen_slot(tmo_gen &g)
         bw_put(q, &pos, 0xd70, 12);
         std::vector<uint8_t> h = unpack(q, 124);
 
-        tetra_encode_sch(TETRA_SCH_H, h.data(), scramb(), b2);
+        tetra_encode_sch(TETRA_SCH_H, h.data(), sc, b2);
         tetra_tmo_build_sb(slot, sb, bb, b2);
         g.synced = true;
+    } else if (tch) {
+        for (unsigned i = 0; i < 432; i++) {
+            g.r ^= g.r << 13;
+            g.r ^= g.r >> 17;
+            g.r ^= g.r << 5;
+            t5[i] = g.r & 1;
+        }
+        tetra_tmo_build_ndb(slot, t5, bb, t5 + 216, false);
     } else if (g.synced && g.tn == 1 && g.fn != 18 && !g.schf.empty()) {
-        tetra_encode_sch(TETRA_SCH_F, g.schf.front().data(), scramb(), t5);
+        tetra_encode_sch(TETRA_SCH_F, g.schf.front().data(), sc, t5);
         g.schf.erase(g.schf.begin());
         tetra_tmo_build_ndb(slot, t5, bb, t5 + 216, false);
     } else {
         std::vector<uint8_t> n = null_block(124);
 
-        tetra_encode_sch(TETRA_SCH_H, n.data(), scramb(), b1);
-        tetra_encode_sch(TETRA_SCH_H, n.data(), scramb(), b2);
+        tetra_encode_sch(TETRA_SCH_H, n.data(), sc, b1);
+        tetra_encode_sch(TETRA_SCH_H, n.data(), sc, b2);
         tetra_tmo_build_ndb(slot, b1, bb, b2, true);
     }
     g.bits.insert(g.bits.end(), slot, slot + 510);
@@ -1230,4 +1249,60 @@ TEST_CASE("TMO receiver re-aligns its slot grid after a jump in the stream",
         REQUIRE(c.rx.crc_ok - mid_ok > 4 * 18 * 6);
         REQUIRE(c.rx.realigned == 1);
     }
+}
+
+TEST_CASE("TMO receiver following one timeslot of traffic stays aligned",
+          "[tmo]")
+{
+    static capture c;
+    tmo_gen g;
+
+    for (unsigned i = 0; i < 4 * 18 * 2; i++)
+        gen_slot(g);
+    const size_t lock_bits = g.bits.size();
+    g.tch_tn = 2;
+    g.tch_um = 10;
+    for (unsigned i = 0; i < 4 * 18 * 6; i++)
+        gen_slot(g);
+
+    init(c);
+    tetra_tmo_push_bits(&c.rx, g.bits.data(), lock_bits);
+    REQUIRE(tetra_tmo_locked(&c.rx));
+    const uint32_t crc_before = tetra_tmo_crc_ok(&c.rx);
+
+    /* Only the call's timeslot: its traffic carries no CRC */
+    tetra_tmo_set_slots(&c.rx, TETRA_TS2);
+    tetra_tmo_push_bits(&c.rx, g.bits.data() + lock_bits,
+                        g.bits.size() - lock_bits);
+
+    REQUIRE(tetra_tmo_locked(&c.rx));
+    REQUIRE(c.locks == 1);
+    REQUIRE(tetra_tmo_realigned(&c.rx, nullptr) == 0);
+    REQUIRE(tetra_tmo_crc_ok(&c.rx) > crc_before); /* sync bursts */
+    REQUIRE(c.tch.size() >= 17 * 6 - 1);
+}
+
+TEST_CASE("TMO receiver drops the lock for another cell's sync burst", "[tmo]")
+{
+    static capture c;
+    tmo_gen a, b;
+
+    b.cc = CC + 1;
+    for (unsigned i = 0; i < 4 * 18 * 3; i++)
+        gen_slot(a);
+    for (unsigned i = 0; i < 4 * 18 * 4; i++)
+        gen_slot(b);
+    /* The radio ends up on another cell, with another timing */
+    std::vector<uint8_t> bits(a.bits);
+    bits.insert(bits.end(), b.bits.begin() + 1037, b.bits.end());
+
+    init(c);
+    tetra_tmo_push_bits(&c.rx, bits.data(), bits.size());
+
+    /* Not a realignment: lost, then acquired with the new cell's events */
+    REQUIRE(tetra_tmo_realigned(&c.rx, nullptr) == 0);
+    REQUIRE(c.unlocks == 1);
+    REQUIRE(c.locks == 2);
+    REQUIRE(tetra_tmo_locked(&c.rx));
+    REQUIRE(tetra_tmo_cell(&c.rx)->colour_code == CC + 1);
 }

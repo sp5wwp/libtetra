@@ -56,6 +56,8 @@ struct tmo_macinfo {
 
 /* Upper MAC (src/l2/tmo_mac.c) */
 void tmo_mac_sync(struct tetra_tmo_rx *rx, const uint8_t *blk);
+/* The BSCH in blk names the cell already received (MCC, MNC, colour code). */
+bool tmo_mac_sync_same_cell(const struct tetra_tmo_rx *rx, const uint8_t *blk);
 int tmo_mac_block(struct tetra_tmo_rx *rx, enum tmo_lchan ch,
                   const uint8_t *blk, unsigned nbits,
                   unsigned cipher_offset_bits);

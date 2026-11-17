@@ -93,6 +93,18 @@ const struct tetra_cell *tetra_tmo_cell(const struct tetra_tmo_rx *rx)
     return rx->locked ? &rx->cell : NULL;
 }
 
+uint32_t tetra_tmo_crc_ok(const struct tetra_tmo_rx *rx)
+{
+    return rx->crc_ok;
+}
+
+uint32_t tetra_tmo_realigned(const struct tetra_tmo_rx *rx, int32_t *last_shift)
+{
+    if (last_shift)
+        *last_shift = rx->realign_shift;
+    return rx->realigned;
+}
+
 bool tetra_tmo_locked(const struct tetra_tmo_rx *rx)
 {
     return rx->locked;
@@ -108,6 +120,7 @@ static void set_lock(struct tetra_tmo_rx *rx, bool locked, bool follow)
     rx->locked = locked;
     rx->realign_cand = false;
     rx->deaf_slots = 0;
+    rx->aach_ok = false;
     rx->crc_seen = rx->crc_ok;
 #if TETRA_UPLINK_DETECT
     memset(&rx->ul, 0, sizeof(rx->ul));
@@ -161,12 +174,19 @@ void tmo_advance_time(struct tetra_tmo_rx *rx)
 }
 
 /* Decode the BSCH of a synchronisation burst starting at slot index s. */
-static bool decode_bsch(struct tetra_tmo_rx *rx, uint32_t s)
+/* SCH/S of the sync burst at s into rx->blk[0]; true if its CRC passed. */
+static bool bsch_block(struct tetra_tmo_rx *rx, uint32_t s)
 {
     int8_t *sb = rx->ws.in;
 
     rxcore_copy(&rx->core, s + TMO_SB_SB, sb, 120);
-    if (!lmac_decode(&rx->ws, LMAC_SCH_S, sb, tetra_scramb_init(0), rx->blk[0]))
+    return lmac_decode(&rx->ws, LMAC_SCH_S, sb, tetra_scramb_init(0),
+                       rx->blk[0]);
+}
+
+static bool decode_bsch(struct tetra_tmo_rx *rx, uint32_t s)
+{
+    if (!bsch_block(rx, s))
         return false;
     rx->crc_ok++;
     tmo_mac_sync(rx, rx->blk[0]);
@@ -193,6 +213,9 @@ static uint8_t decode_aach(struct tetra_tmo_rx *rx, uint32_t s, bool sb)
         cw = (cw << 1) | hb[i];
     if (tetra_rm3014_decode(cw, &data) < 0)
         return 0xff;
+    /* At most 2 errors in 30 bits: about 0.7% of random words pass, so a
+     * decoded AACH shows the grid is right, also on traffic slots. */
+    rx->aach_ok = true;
 
     /* ACCESS-ASSIGN, table 21.82: in frame 18 there is no DL usage. */
     unsigned header = (data >> 12) & 3;
@@ -671,12 +694,15 @@ static __attribute__((noinline)) void slots_due(struct tetra_tmo_rx *rx)
             break;
         rx->slot_start += SLOT_BITS;
         tmo_advance_time(rx);
-        if (rx->crc_ok != rx->crc_seen) {
+        /* Traffic slots carry no CRC, so a decoded AACH counts too:
+         * otherwise a call followed with tetra_tmo_set_slots() looks deaf */
+        if (rx->crc_ok != rx->crc_seen || rx->aach_ok) {
             rx->crc_seen = rx->crc_ok;
             rx->deaf_slots = 0;
         } else if (rx->deaf_slots < UINT16_MAX) {
             rx->deaf_slots++;
         }
+        rx->aach_ok = false;
     }
 }
 
@@ -692,6 +718,10 @@ static __attribute__((noinline)) void slots_due(struct tetra_tmo_rx *rx)
  * one whose BSCH passes its CRC. A sync burst is only ever on the grid of
  * the cell sending it: one decoding where the grid does not is the cell's
  * real timing. Calls, fragments and the cell are kept.
+ *
+ * A sync burst of another cell (MCC, MNC or colour code) is not ours to
+ * align on. The radio is no longer receiving our cell, so the lock is
+ * dropped and the normal search acquires the new one, with its events.
  */
 #define REALIGN_DEAF_SLOTS 8
 
@@ -718,15 +748,26 @@ static __attribute__((noinline)) void realign(struct tetra_tmo_rx *rx)
     const struct tetra_time old_t = rx->t;
     const uint32_t old_start = rx->slot_start;
 
-    if (!decode_bsch(rx, rx->realign_start))
-        return; /* sets rx->t to the burst's slot on success */
+    if (!bsch_block(rx, rx->realign_start))
+        return;
+    if (!tmo_mac_sync_same_cell(rx, rx->blk[0])) {
+        set_lock(rx, false, true);
+        return;
+    }
+    rx->crc_ok++;
+    tmo_mac_sync(rx, rx->blk[0]); /* sets rx->t to the burst's slot */
     int32_t slots = (int32_t)((hyper_slot(&rx->t) + 4320u -
                                hyper_slot(&old_t)) % 4320u);
     if (slots >= 2160)
         slots -= 4320;
-    rx->realign_shift = (int32_t)(rx->realign_start -
-                                  (old_start + (uint32_t)(slots * SLOT_BITS)));
-    rx->realigned++;
+    const int32_t shift =
+        (int32_t)(rx->realign_start -
+                  (old_start + (uint32_t)(slots * SLOT_BITS)));
+    /* A burst exactly where the grid has it confirms the grid */
+    if (slots != 0 || shift != 0) {
+        rx->realign_shift = shift;
+        rx->realigned++;
+    }
     rx->slot_start = rx->realign_start;
     rx->bad_slots = 0;
     rx->deaf_slots = 0;

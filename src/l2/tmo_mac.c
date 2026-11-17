@@ -40,6 +40,22 @@ static void clear_cell_associations(struct tetra_tmo_rx *rx)
 }
 
 /* SYNC PDU on the BSCH, table 21.76 + D-MLE-SYNC (table 18.17). */
+bool tmo_mac_sync_same_cell(const struct tetra_tmo_rx *rx, const uint8_t *blk)
+{
+    struct bitrd b;
+    uint8_t cc;
+    uint16_t mcc, mnc;
+
+    br_init(&b, blk, 0, 60);
+    br_skip(&b, 4);
+    cc = (uint8_t)br_get(&b, 6);
+    br_skip(&b, 2 + 5 + 6 + 2 + 3 + 1 + 1 + 1);
+    mcc = (uint16_t)br_get(&b, 10);
+    mnc = (uint16_t)br_get(&b, 14);
+    return mcc == rx->cell.mcc && mnc == rx->cell.mnc &&
+           cc == rx->cell.colour_code;
+}
+
 void tmo_mac_sync(struct tetra_tmo_rx *rx, const uint8_t *blk)
 {
     struct bitrd b;

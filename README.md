@@ -156,6 +156,20 @@ Some details worth knowing.
 - If you change frequency on your own, call `tetra_tmo_resync()`. The
   receiver then re-acquires where it is and does not ask to go back.
 
+## Lock health
+
+A TMO receiver can keep the burst timing while nothing decodes, for example
+after a jump in the symbol stream. It recovers on its own. When eight slots
+in a row decode neither a block nor an AACH, it looks for a sync burst
+anywhere. One from the same cell moves the slot grid and keeps the calls and
+the cell. One from another cell drops the lock, and the normal search then
+acquires the new cell with its own SYNC and CELL events.
+
+Two counters show what the lock is doing. `tetra_tmo_crc_ok()` counts the
+downlink blocks whose CRC passed and rises steadily while the lock decodes.
+`tetra_tmo_realigned()` counts the moves of the slot grid and can return the
+last shift in bits.
+
 ## Events
 
 Everything the receiver decodes arrives through the one callback in
