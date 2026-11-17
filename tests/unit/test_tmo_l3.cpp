@@ -444,3 +444,33 @@ TEST_CASE("CMCE usage marker given to a new call on the same channel",
     for (size_t i = calls; i < c.calls.size(); i++)
         REQUIRE(c.calls[i].what != TETRA_CALL_RELEASE);
 }
+
+TEST_CASE("CMCE traffic on a call's carrier after the application retuned",
+          "[tmo][cmce]")
+{
+    static capture c;
+    const uint8_t um = 21;
+
+    init(c, 4321); /* not promiscuous */
+    c.rx.cell.main_carrier = 100;
+    c.rx.t.tn = 2;
+    /* Our call is on carrier 200, TS2. The application tuned there itself
+     * and called tetra_tmo_resync(): the receiver still takes the main
+     * carrier for the one received. */
+    deliver_ca(c, cmce_setup(400, 888), 4321, um, 200, 0x2);
+    tmo_traffic(&c.rx, um, TETRA_HALF_TCH, TETRA_HALF_TCH);
+    REQUIRE(c.traffic.size() == 1);
+    REQUIRE(c.traffic[0].call_id == 400);
+    REQUIRE(c.traffic[0].talker_ssi == 888);
+
+    /* Another timeslot is not the call's, whatever the carrier */
+    c.rx.t.tn = 3;
+    tmo_traffic(&c.rx, um, TETRA_HALF_TCH, TETRA_HALF_TCH);
+    REQUIRE(c.traffic.size() == 1);
+
+    /* A call on the carrier received still wins over one elsewhere */
+    c.rx.t.tn = 2;
+    deliver_ca(c, cmce_setup(500, 999), 4321, um, 100, 0x2);
+    tmo_traffic(&c.rx, um, TETRA_HALF_TCH, TETRA_HALF_TCH);
+    REQUIRE(c.traffic.back().call_id == 500);
+}

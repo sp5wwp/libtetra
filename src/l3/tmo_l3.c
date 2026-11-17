@@ -864,8 +864,13 @@ void tmo_traffic(struct tetra_tmo_rx *rx, uint8_t um, enum tetra_half h1,
 
     if (rx->follow.active && rx->follow.tuned != 0xffff)
         cn = rx->follow.tuned;
-    /* The call holding the marker on this channel; one whose channel is
-     * not known yet if none is known to be on it */
+    /*
+     * The call holding the marker on this channel, else one whose channel
+     * is not known yet, else one on this timeslot of another carrier. The
+     * timeslot received is certain, the carrier is not: after the
+     * application tuned on its own and called tetra_tmo_resync(), cn is
+     * the main carrier while the radio may be on the call's carrier.
+     */
     for (unsigned i = 0; i < TETRA_TMO_MAX_CALLS; i++) {
         struct tetra_tmo_call_state *o = &rx->calls[i];
         int score;
@@ -873,11 +878,13 @@ void tmo_traffic(struct tetra_tmo_rx *rx, uint8_t um, enum tetra_half h1,
         if (!o->used || o->usage_marker != um)
             continue;
         if (o->carrier == 0xffff || o->timeslots == 0 || ts == 0)
-            score = 1;
-        else if (o->carrier == cn && (o->timeslots & ts))
             score = 2;
-        else
+        else if (!(o->timeslots & ts))
             continue;
+        else if (o->carrier == cn)
+            score = 3;
+        else
+            score = 1;
         if (score > best) {
             best = score;
             c = o;
