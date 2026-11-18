@@ -11,6 +11,14 @@ else()
 endif()
 
 option(TETRA_BUILD_TOOLS "Build host tools" ${TETRA_HOST_DEFAULT})
+# Install rules only for a standalone build: a project embedding libtetra
+# with add_subdirectory() may link it to targets that cannot be exported
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(TETRA_INSTALL_DEFAULT ON)
+else()
+    set(TETRA_INSTALL_DEFAULT OFF)
+endif()
+option(TETRA_INSTALL "Generate install rules" ${TETRA_INSTALL_DEFAULT})
 option(TETRA_BUILD_TESTS "Build unit tests (Catch2)" ${TETRA_HOST_DEFAULT})
 option(TETRA_ENABLE_CRYPTO "Build TEA/TB5 and TMO decryption support" OFF)
 option(TETRA_UPLINK_DETECT
@@ -131,31 +139,33 @@ target_compile_options(tetra PRIVATE
     -Wall -Wextra -ffunction-sections -fdata-sections
 )
 
-install(TARGETS tetra EXPORT libtetraTargets ARCHIVE DESTINATION lib)
-install(DIRECTORY include/tetra DESTINATION include
-        PATTERN "tetra_config.h" EXCLUDE)
-install(FILES "${TETRA_GENERATED_INCLUDE_DIR}/tetra/tetra_config.h"
-        DESTINATION include/tetra)
+if(TETRA_INSTALL)
+    install(TARGETS tetra EXPORT libtetraTargets ARCHIVE DESTINATION lib)
+    install(DIRECTORY include/tetra DESTINATION include
+            PATTERN "tetra_config.h" EXCLUDE)
+    install(FILES "${TETRA_GENERATED_INCLUDE_DIR}/tetra/tetra_config.h"
+            DESTINATION include/tetra)
 
-include(CMakePackageConfigHelpers)
-configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/libtetraConfig.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfig.cmake"
-    INSTALL_DESTINATION lib/cmake/libtetra
-)
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfigVersion.cmake"
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion
-)
-install(EXPORT libtetraTargets
-        FILE libtetraTargets.cmake
-        NAMESPACE tetra::
-        DESTINATION lib/cmake/libtetra)
-install(FILES
+    include(CMakePackageConfigHelpers)
+    configure_package_config_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/libtetraConfig.cmake.in"
         "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfig.cmake"
+        INSTALL_DESTINATION lib/cmake/libtetra
+    )
+    write_basic_package_version_file(
         "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfigVersion.cmake"
-        DESTINATION lib/cmake/libtetra)
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion
+    )
+    install(EXPORT libtetraTargets
+            FILE libtetraTargets.cmake
+            NAMESPACE tetra::
+            DESTINATION lib/cmake/libtetra)
+    install(FILES
+            "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfig.cmake"
+            "${CMAKE_CURRENT_BINARY_DIR}/libtetraConfigVersion.cmake"
+            DESTINATION lib/cmake/libtetra)
+endif()
 
 if(TETRA_BUILD_TOOLS OR TETRA_BUILD_TESTS)
     # Synthetic DMO traffic, shared by tetra_gen and the tests.
