@@ -387,6 +387,12 @@ int main(int argc, char **argv)
     if (tch_out)
         fclose(tch_out);
     fprintf(stderr, "%u traffic slots\n", n_traffic);
+    if (!is_dmo) {
+        int32_t shift = 0;
+        uint32_t realigned = tetra_tmo_realigned(&tmo, &shift);
+        fprintf(stderr, "%u blocks passed the CRC, %u realignments\n",
+                tetra_tmo_crc_ok(&tmo), realigned);
+    }
     if (speech_out) {
         fclose(speech_out);
         fprintf(stderr, "%u speech frames, %u passed the CRC\n", n_frames,
