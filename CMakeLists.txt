@@ -177,7 +177,7 @@ if(TETRA_BUILD_TOOLS OR TETRA_BUILD_TESTS)
 endif()
 
 if(TETRA_BUILD_TOOLS)
-    foreach(tool tetra_demod tetra_rx tetra_gen)
+    foreach(tool tetra_demod tetra_rx tetra_gen tetra_tmo_gen)
         add_executable(${tool} tools/${tool}.c)
         set_target_properties(${tool} PROPERTIES C_STANDARD 17
                                                  C_EXTENSIONS ON)
@@ -186,6 +186,7 @@ if(TETRA_BUILD_TOOLS)
     target_link_libraries(tetra_demod PRIVATE m)
     target_link_libraries(tetra_rx PRIVATE tetra)
     target_link_libraries(tetra_gen PRIVATE dmo_scenario m)
+    target_link_libraries(tetra_tmo_gen PRIVATE tetra m)
 endif()
 
 if(TETRA_BUILD_TESTS)
