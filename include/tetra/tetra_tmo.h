@@ -177,6 +177,8 @@ struct tetra_tmo_rx {
     struct tetra_cell cell;
     struct tetra_network network;
     uint8_t dl_um[4];
+    uint8_t tch_um[4];   /* Usage marker of the traffic on each timeslot */
+    uint8_t tch_held[4]; /* Traffic slots taken without a decoded AACH */
     uint8_t blk[2][34];
     int8_t tch[TETRA_TCH_BITS];
 #if TETRA_ENABLE_CRYPTO

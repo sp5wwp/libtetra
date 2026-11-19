@@ -24,6 +24,8 @@
 static const int8_t search_order[] = { 0, -2, 2, -4, 4 };
 /* Slots without a recognisable burst before declaring loss of lock. */
 #define LOCK_LOSS_SLOTS 144
+/* Traffic slots taken in a row without a decoded AACH (see process_slot) */
+#define TCH_HOLD_MAX 3
 
 void tmo_emit(struct tetra_tmo_rx *rx, struct tetra_event *ev)
 {
@@ -57,6 +59,7 @@ void tetra_tmo_init(struct tetra_tmo_rx *rx, const struct tetra_rx_config *cfg)
     rx->slots = TETRA_TS_ALL;
     rx->follow.tuned = 0xffff;
     memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
+    memset(rx->tch_um, 0xff, sizeof(rx->tch_um));
 }
 
 void tetra_tmo_set_slots(struct tetra_tmo_rx *rx, uint8_t mask)
@@ -135,8 +138,10 @@ static void set_lock(struct tetra_tmo_rx *rx, bool locked, bool follow)
         memset(rx->frag[i].eck, 0, sizeof(rx->frag[i].eck));
 #endif
     }
-    if (!locked)
+    if (!locked) {
         memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
+        memset(rx->tch_um, 0xff, sizeof(rx->tch_um));
+    }
     memset(&ev, 0, sizeof(ev));
     ev.type = TETRA_EV_SYNC;
     ev.u.sync.locked = locked;
@@ -290,6 +295,7 @@ static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
     /* Deselected slots: only synchronisation bursts keep the timing. */
     if (!(rx->slots & (1u << (rx->t.tn - 1)))) {
         rx->dl_um[rx->t.tn - 1] = 0xff;
+        rx->tch_um[rx->t.tn - 1] = 0xff;
         rx->frag[rx->t.tn - 1].active = false;
 #if TETRA_ENABLE_CRYPTO
         memset(rx->frag[rx->t.tn - 1].eck, 0,
@@ -302,7 +308,28 @@ static void process_slot(struct tetra_tmo_rx *rx, uint32_t s, bool sb,
     um = decode_aach(rx, s, sb);
     bool traffic = um != 0xff && um != 0xfe && um >= 4;
 
-    rx->dl_um[rx->t.tn - 1] = um;
+    /*
+     * The AACH is decoded from hard decisions and fails well before the
+     * traffic it announces does. A full slot on a timeslot that carried
+     * traffic in the last frame, with an AACH that did not decode, is taken
+     * for that traffic again, for TCH_HOLD_MAX frames in a row; the speech
+     * frames' own CRC catches it if the call has ended. A decoded AACH
+     * without traffic ends it; frame 18 (no usage marker) does not.
+     */
+    unsigned tn = rx->t.tn - 1u;
+    if (traffic) {
+        rx->tch_um[tn] = um;
+        rx->tch_held[tn] = 0;
+    } else if (um == 0xff && !sb && train_n && rx->t.fn != 18 &&
+               rx->tch_um[tn] != 0xff && rx->tch_held[tn] < TCH_HOLD_MAX) {
+        um = rx->tch_um[tn];
+        traffic = true;
+        rx->tch_held[tn]++;
+    } else if (um != 0xff && um != 0xfe) {
+        rx->tch_um[tn] = 0xff;
+    }
+
+    rx->dl_um[tn] = um;
 
     if (sb) {
         decode_bsch(rx, s);

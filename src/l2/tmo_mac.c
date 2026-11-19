@@ -37,6 +37,7 @@ static void clear_cell_associations(struct tetra_tmo_rx *rx)
     memset(&rx->network, 0, sizeof(rx->network));
     rx->have_network = false;
     memset(rx->dl_um, 0xff, sizeof(rx->dl_um));
+    memset(rx->tch_um, 0xff, sizeof(rx->tch_um));
 }
 
 /* SYNC PDU on the BSCH, table 21.76 + D-MLE-SYNC (table 18.17). */
